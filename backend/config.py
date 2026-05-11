@@ -1,0 +1,18 @@
+import os
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+@dataclass(frozen=True)
+class Settings:
+    api_key: str = os.getenv("GEMMA_API_KEY", "")
+    e4b_model: str = os.getenv("GEMMA_E4B_MODEL", "gemma-4-26b-a4b-it")
+    moe_model: str = os.getenv("GEMMA_MOE_MODEL", "gemma-4-26b-a4b-it")
+    max_contract_chars: int = int(os.getenv("MAX_CONTRACT_CHARS", "120000"))
+    summary_trigger_chars: int = int(os.getenv("SUMMARY_TRIGGER_CHARS", "20000"))
+    summary_chunk_chars: int = int(os.getenv("SUMMARY_CHUNK_CHARS", "8000"))
+    max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", "10485760"))
+
+settings = Settings()
