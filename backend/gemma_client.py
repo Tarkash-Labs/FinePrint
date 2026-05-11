@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any
-import os
 from google import genai
 from google.genai import types
 
@@ -11,8 +10,9 @@ class GemmaClientError(RuntimeError):
 class GemmaClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
-        # Initialize the official SDK client
-        self.client = genai.Client(api_key=api_key)
+        self.client: genai.Client | None = None
+        if api_key:
+            self.client = genai.Client(api_key=api_key)
 
     def generate_content(
         self,
@@ -23,6 +23,9 @@ class GemmaClient:
     ) -> str:
         if not self.api_key:
             raise GemmaClientError("Missing GEMMA_API_KEY")
+
+        if self.client is None:
+            self.client = genai.Client(api_key=self.api_key)
 
         config_args = {
             "temperature": temperature,

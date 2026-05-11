@@ -1,3 +1,5 @@
+import base64
+import binascii
 import os
 import re
 
@@ -47,6 +49,42 @@ def get_upload_size(upload: UploadFile) -> int | None:
         return size
     except Exception:
         return None
+
+def decode_base64_payload(payload: str, mime_type: str | None) -> tuple[bytes, str]:
+    trimmed = payload.strip()
+    detected_mime = mime_type
+    if trimmed.startswith("data:"):
+        header, _, data = trimmed.partition(",")
+        if not data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid base64 payload",
+            )
+        header_mime = header[5:].split(";")[0]
+        detected_mime = header_mime or detected_mime
+        trimmed = data
+
+    try:
+        decoded = base64.b64decode(trimmed, validate=True)
+    except binascii.Error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid base64 payload",
+        )
+
+    if not decoded:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Base64 payload is empty",
+        )
+
+    if not detected_mime:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing MIME type for base64 payload",
+        )
+
+    return decoded, detected_mime
 
 def summarize_contract_text(text: str) -> str:
     chunks = chunk_text(text, settings.summary_chunk_chars)
@@ -221,6 +259,8 @@ async def analyze_contract(
     contract_type: str = Form(...),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
+    base64_image: str | None = Form(None),
+    base64_mime_type: str | None = Form(None),
 ):
     if not settings.api_key:
         raise HTTPException(
@@ -238,23 +278,50 @@ async def analyze_contract(
     if trimmed_text:
         contract_text = clamp_text(trimmed_text, settings.max_contract_chars)
     else:
-        if file is None:
+        if file is None and not base64_image:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Provide either a file or contract text",
+                detail="Provide a file, base64 payload, or contract text",
             )
 
-        content_type = file.content_type
-        if not content_type:
-            ext = os.path.splitext(file.filename or "")[1].lower()
-            ext_map = {
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".webp": "image/webp",
-                ".pdf": "application/pdf",
-            }
-            content_type = ext_map.get(ext, "application/octet-stream")
+        content_type: str | None = None
+        contents: bytes
+
+        if file is not None:
+            content_type = file.content_type
+            if not content_type:
+                ext = os.path.splitext(file.filename or "")[1].lower()
+                ext_map = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".webp": "image/webp",
+                    ".pdf": "application/pdf",
+                }
+                content_type = ext_map.get(ext, "application/octet-stream")
+
+            max_upload_bytes = settings.max_upload_bytes
+            upload_size = get_upload_size(file)
+            if upload_size is not None and upload_size > max_upload_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=(
+                        "Uploaded file is too large. "
+                        f"Max size is {format_megabytes(max_upload_bytes)}."
+                    ),
+                )
+
+            contents = await file.read()
+            if not contents:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Uploaded file is empty",
+                )
+        else:
+            contents, content_type = decode_base64_payload(
+                base64_image or "",
+                base64_mime_type,
+            )
 
         if content_type not in SUPPORTED_MIME_TYPES:
             raise HTTPException(
@@ -263,22 +330,6 @@ async def analyze_contract(
             )
 
         max_upload_bytes = settings.max_upload_bytes
-        upload_size = get_upload_size(file)
-        if upload_size is not None and upload_size > max_upload_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=(
-                    "Uploaded file is too large. "
-                    f"Max size is {format_megabytes(max_upload_bytes)}."
-                ),
-            )
-
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty",
-            )
         if len(contents) > max_upload_bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
