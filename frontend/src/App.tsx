@@ -11,6 +11,7 @@ const CONTRACT_TYPES = [
 ];
 
 type Severity = 'high' | 'medium' | 'low';
+type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 
 type FlaggedClause = {
   clause_title: string;
@@ -25,17 +26,74 @@ type SafeClause = {
 
 type AnalyzeResult = {
   risk_score: number;
+  compatibility_score: number;
+  verdict: Verdict;
+  verdict_reason: string;
   red_flags: FlaggedClause[];
   safe_clauses: SafeClause[];
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+const SCORE_TONE_STYLES = {
+  green: {
+    badge: 'bg-emerald-100 text-emerald-700',
+    text: 'text-emerald-600',
+  },
+  amber: {
+    badge: 'bg-amber-100 text-amber-700',
+    text: 'text-amber-600',
+  },
+  red: {
+    badge: 'bg-red-100 text-red-700',
+    text: 'text-red-600',
+  },
+} as const;
+
+const getRiskMeta = (score: number) => {
+  if (score <= 30) {
+    return { label: 'Safe', description: 'Low objective risk.', tone: 'green' as const };
+  }
+  if (score <= 60) {
+    return { label: 'Caution', description: 'Some risk worth reviewing.', tone: 'amber' as const };
+  }
+  return { label: 'Dangerous', description: 'High risk and major red flags.', tone: 'red' as const };
+};
+
+const getCompatibilityMeta = (score: number) => {
+  if (score <= 30) {
+    return { label: 'Low Match', description: 'Poor fit with your goals.', tone: 'red' as const };
+  }
+  if (score <= 60) {
+    return { label: 'Mixed Fit', description: 'Some alignment, some conflicts.', tone: 'amber' as const };
+  }
+  return { label: 'Strong Match', description: 'Aligned with your goals.', tone: 'green' as const };
+};
+
+const VERDICT_META = {
+  ACCEPT: {
+    label: 'ACCEPT',
+    description: 'Low risk and strong compatibility.',
+    tone: 'green' as const,
+  },
+  NEGOTIATE: {
+    label: 'NEGOTIATE',
+    description: 'Some red flags or goal conflicts.',
+    tone: 'amber' as const,
+  },
+  REJECT: {
+    label: 'REJECT',
+    description: 'High risk or poor compatibility.',
+    tone: 'red' as const,
+  },
+};
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [inputMode, setInputMode] = useState<'file' | 'text'>('file');
   const [contractText, setContractText] = useState('');
   const [contractType, setContractType] = useState(CONTRACT_TYPES[0].id);
+  const [requirements, setRequirements] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +119,7 @@ function App() {
 
   const handleAnalyze = async () => {
     const trimmedText = contractText.trim();
+    const trimmedRequirements = requirements.trim();
 
     if (inputMode === 'file' && !file) {
       setError('Please upload a file.');
@@ -83,6 +142,9 @@ function App() {
     }
     if (inputMode === 'text') {
       formData.append('text', trimmedText);
+    }
+    if (trimmedRequirements) {
+      formData.append('requirements', trimmedRequirements);
     }
 
     try {
@@ -119,6 +181,10 @@ function App() {
       setIsAnalyzing(false);
     }
   };
+
+  const riskMeta = getRiskMeta(result?.risk_score ?? 0);
+  const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? 0);
+  const verdictMeta = result ? VERDICT_META[result.verdict] ?? VERDICT_META.NEGOTIATE : VERDICT_META.NEGOTIATE;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
@@ -230,6 +296,18 @@ function App() {
               </select>
             </div>
 
+            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm">
+              <label className="block text-sm font-semibold text-slate-700 mb-2">Your Requirements</label>
+              <textarea
+                value={requirements}
+                onChange={(e) => setRequirements(e.target.value)}
+                rows={4}
+                className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="Example: I plan to stay 2 years, want to keep my side project, avoid a non-compete, and prefer remote-friendly roles."
+              />
+              <p className="text-xs text-slate-500 mt-2">Used to compute compatibility and the final verdict.</p>
+            </div>
+
             <button 
               onClick={handleAnalyze}
               disabled={
@@ -263,15 +341,48 @@ function App() {
               </button>
             </div>
 
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-6">
-              <div className="flex-shrink-0">
-                <div className="w-24 h-24 rounded-full border-8 border-red-500 flex items-center justify-center">
-                  <span className="text-3xl font-extrabold text-red-600">{result.risk_score}</span>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Risk Score</h3>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[riskMeta.tone].badge}`}>
+                    {riskMeta.label}
+                  </span>
                 </div>
+                <div className="mt-4 flex items-baseline gap-2">
+                  <span className={`text-4xl font-extrabold ${SCORE_TONE_STYLES[riskMeta.tone].text}`}>
+                    {result.risk_score}
+                  </span>
+                  <span className="text-sm text-slate-500">/ 100</span>
+                </div>
+                <p className="mt-2 text-sm text-slate-600">{riskMeta.description}</p>
               </div>
-              <div>
-                <h3 className="text-xl font-bold text-slate-900">High Risk</h3>
-                <p className="text-slate-600 mt-1">This contract contains critical red flags. Proceed with caution and review the flagged clauses below.</p>
+
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Compatibility</h3>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[compatibilityMeta.tone].badge}`}>
+                    {compatibilityMeta.label}
+                  </span>
+                </div>
+                <div className="mt-4 flex items-baseline gap-2">
+                  <span className={`text-4xl font-extrabold ${SCORE_TONE_STYLES[compatibilityMeta.tone].text}`}>
+                    {result.compatibility_score}
+                  </span>
+                  <span className="text-sm text-slate-500">/ 100</span>
+                </div>
+                <p className="mt-2 text-sm text-slate-600">{compatibilityMeta.description}</p>
+              </div>
+
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Final Verdict</h3>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[verdictMeta.tone].badge}`}>
+                    {verdictMeta.label}
+                  </span>
+                </div>
+                <p className="mt-4 text-sm text-slate-600">{verdictMeta.description}</p>
+                <p className="mt-3 text-sm font-semibold text-slate-900">{result.verdict_reason}</p>
               </div>
             </div>
 

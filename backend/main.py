@@ -13,13 +13,13 @@ from typing import Any, Iterator, List
 from config import settings
 from gemma_client import GemmaClient, GemmaClientError
 from prompts import (
-    CONTRACT_ANALYSIS_PROMPTS,
     CONTRACT_TYPE_LABELS,
     EXPLANATION_PROMPT_TEMPLATE,
     EXPLANATION_SYSTEM_PROMPT_TEMPLATE,
     OCR_PROMPT,
     SUMMARY_CHUNK_PROMPT,
     SUMMARY_COMBINE_PROMPT,
+    get_contract_prompt,
 )
 from utils import extract_json_object, clamp_text, chunk_text
 
@@ -33,7 +33,6 @@ SUPPORTED_MIME_TYPES = {
     "application/pdf",
 }
 
-CONTRACT_PROMPTS = CONTRACT_ANALYSIS_PROMPTS
 CONTRACT_LABELS = CONTRACT_TYPE_LABELS
 
 gemma_client = GemmaClient(
@@ -101,13 +100,47 @@ def normalize_severity(value: Any) -> str:
         return normalized
     return "medium"
 
-def parse_analysis_payload(payload: dict) -> tuple[int, list[dict], list[dict]]:
+def compute_verdict(risk_score: int, compatibility_score: int) -> str:
+    if risk_score >= 61 or compatibility_score <= 30:
+        return "REJECT"
+    if risk_score <= 30 and compatibility_score >= 70:
+        return "ACCEPT"
+    return "NEGOTIATE"
+
+def parse_analysis_payload(
+    payload: dict,
+) -> tuple[int, int, str, str, list[dict], list[dict]]:
     raw_score = payload.get("risk_score", payload.get("riskScore", 0))
     try:
         risk_score = int(raw_score)
     except (TypeError, ValueError):
         risk_score = 0
     risk_score = max(0, min(100, risk_score))
+
+    raw_comp = payload.get("compatibility_score", payload.get("compatibilityScore", 50))
+    try:
+        compatibility_score = int(raw_comp)
+    except (TypeError, ValueError):
+        compatibility_score = 50
+    compatibility_score = max(0, min(100, compatibility_score))
+
+    verdict = normalize_text(
+        payload.get("verdict")
+        or payload.get("final_verdict")
+        or payload.get("decision")
+    ).upper()
+    if verdict not in ("ACCEPT", "NEGOTIATE", "REJECT"):
+        verdict = compute_verdict(risk_score, compatibility_score)
+
+    verdict_reason = normalize_text(
+        payload.get("verdict_reason")
+        or payload.get("verdictReason")
+        or payload.get("final_verdict_reason")
+        or payload.get("decision_reason")
+        or payload.get("analysis_summary")
+    )
+    if not verdict_reason:
+        verdict_reason = "Verdict based on overall risk and compatibility."
 
     raw_red_flags = payload.get("red_flags", payload.get("redFlags", []))
     raw_safe_clauses = payload.get("safe_clauses", payload.get("safeClauses", []))
@@ -170,7 +203,14 @@ def parse_analysis_payload(payload: dict) -> tuple[int, list[dict], list[dict]]:
                 }
             )
 
-    return risk_score, red_flags, safe_clauses
+    return (
+        risk_score,
+        compatibility_score,
+        verdict,
+        verdict_reason,
+        red_flags,
+        safe_clauses,
+    )
 
 def summarize_contract_text(text: str) -> str:
     chunks = chunk_text(text, settings.summary_chunk_chars)
@@ -295,15 +335,19 @@ async def read_contract_text(
 
     return clamp_text(extracted_text, settings.max_contract_chars)
 
-def run_moe_analysis(contract_text: str, contract_type: str) -> tuple[int, list[dict], list[dict]]:
+def run_moe_analysis(
+    contract_text: str,
+    contract_type: str,
+    requirements: str | None,
+) -> tuple[int, int, str, str, list[dict], list[dict]]:
     analysis_contents = f"Contract text:\n{contract_text}"
-    analysis_prompt = f"{CONTRACT_PROMPTS[contract_type]}\n\n{analysis_contents}"
+    analysis_prompt = get_contract_prompt(contract_type, requirements)
 
     try:
         analysis_text = gemma_client.generate_content(
             model=settings.moe_model,
             contents=analysis_contents,
-            system_instruction=CONTRACT_PROMPTS[contract_type],
+            system_instruction=analysis_prompt,
             temperature=0.2,
         )
     except GemmaClientError as exc:
@@ -311,19 +355,33 @@ def run_moe_analysis(contract_text: str, contract_type: str) -> tuple[int, list[
         if "INTERNAL" in error_text or "500" in error_text:
             analysis_text = gemma_client.generate_content(
                 model=settings.moe_model,
-                contents=analysis_prompt,
+                contents=f"{analysis_prompt}\n\n{analysis_contents}",
                 temperature=0.2,
             )
         else:
             raise
 
     payload = extract_json_object(analysis_text)
-    risk_score, red_flags, safe_clauses = parse_analysis_payload(payload)
+    (
+        risk_score,
+        compatibility_score,
+        verdict,
+        verdict_reason,
+        red_flags,
+        safe_clauses,
+    ) = parse_analysis_payload(payload)
     if not red_flags and not safe_clauses:
         raise ValueError("Empty analysis payload")
     if risk_score >= 50 and not red_flags:
         raise ValueError("High risk without red flags")
-    return risk_score, red_flags, safe_clauses
+    return (
+        risk_score,
+        compatibility_score,
+        verdict,
+        verdict_reason,
+        red_flags,
+        safe_clauses,
+    )
 
 def explain_red_flag(contract_type: str, flag: dict) -> str:
     clause_title = flag.get("clause_title", "")
@@ -367,10 +425,13 @@ class SafeClause(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     risk_score: int
+    compatibility_score: int
+    verdict: str
+    verdict_reason: str
     red_flags: List[FlaggedClause]
     safe_clauses: List[SafeClause]
 
-def build_fallback_analysis(text: str) -> AnalyzeResponse:
+def build_fallback_analysis(text: str, requirements: str | None = None) -> AnalyzeResponse:
     lowered = text.lower()
     red_flags: list[FlaggedClause] = []
     safe_clauses: list[SafeClause] = []
@@ -479,9 +540,34 @@ def build_fallback_analysis(text: str) -> AnalyzeResponse:
             5,
         )
 
+    requirements_text = normalize_text(requirements).lower()
+    compatibility_score = 50
+    if requirements_text:
+        if (
+            any(term in requirements_text for term in ["leave", "switch", "short term", "short-term", "1 year", "12 month", "12 months"])
+            and any(term in lowered for term in ["service agreement", "bond", "minimum service"])
+        ):
+            compatibility_score -= 20
+        if "side project" in requirements_text and any(
+            term in lowered for term in ["ip assignment", "inventions", "work for hire", "ownership"]
+        ):
+            compatibility_score -= 15
+        if "remote" in requirements_text and any(term in lowered for term in ["on-site", "onsite", "office"]):
+            compatibility_score -= 10
+
     risk_score = max(0, min(100, risk_score))
+    compatibility_score = max(0, min(100, compatibility_score))
+    verdict = compute_verdict(risk_score, compatibility_score)
+    if requirements_text:
+        verdict_reason = "Compatibility is estimated from fallback rules; review clauses against your goals."
+    else:
+        verdict_reason = "No personal requirements provided; verdict based on risk score."
+
     return AnalyzeResponse(
         risk_score=risk_score,
+        compatibility_score=compatibility_score,
+        verdict=verdict,
+        verdict_reason=verdict_reason,
         red_flags=red_flags,
         safe_clauses=safe_clauses,
     )
@@ -495,6 +581,7 @@ async def analyze_contract(
     contract_type: str = Form(...),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
+    requirements: str | None = Form(None),
     base64_image: str | None = Form(None),
     base64_mime_type: str | None = Form(None),
 ):
@@ -504,7 +591,7 @@ async def analyze_contract(
             detail="GEMMA_API_KEY is not configured",
         )
 
-    if contract_type not in CONTRACT_PROMPTS:
+    if contract_type not in CONTRACT_TYPE_LABELS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported contract type",
@@ -518,12 +605,20 @@ async def analyze_contract(
     contract_text = maybe_summarize_contract_text(contract_text)
 
     try:
-        risk_score, red_flags, safe_clauses = run_moe_analysis(
+        (
+            risk_score,
+            compatibility_score,
+            verdict,
+            verdict_reason,
+            red_flags,
+            safe_clauses,
+        ) = run_moe_analysis(
             contract_text,
             contract_type,
+            requirements,
         )
     except Exception:
-        return build_fallback_analysis(contract_text)
+        return build_fallback_analysis(contract_text, requirements)
 
     final_red_flags: list[FlaggedClause] = []
     for flag in red_flags:
@@ -554,6 +649,9 @@ async def analyze_contract(
 
     return AnalyzeResponse(
         risk_score=risk_score,
+        compatibility_score=compatibility_score,
+        verdict=verdict,
+        verdict_reason=verdict_reason,
         red_flags=final_red_flags,
         safe_clauses=final_safe_clauses,
     )
@@ -563,6 +661,7 @@ async def analyze_contract_stream(
     contract_type: str = Form(...),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
+    requirements: str | None = Form(None),
     base64_image: str | None = Form(None),
     base64_mime_type: str | None = Form(None),
 ):
@@ -577,7 +676,7 @@ async def analyze_contract_stream(
             media_type="text/event-stream",
         )
 
-    if contract_type not in CONTRACT_PROMPTS:
+    if contract_type not in CONTRACT_TYPE_LABELS:
         return StreamingResponse(
             iter([
                 sse_event(
@@ -627,13 +726,32 @@ async def analyze_contract_stream(
             )
 
             try:
-                risk_score, red_flags, safe_clauses = run_moe_analysis(
+                (
+                    risk_score,
+                    compatibility_score,
+                    verdict,
+                    verdict_reason,
+                    red_flags,
+                    safe_clauses,
+                ) = run_moe_analysis(
                     working_text,
                     contract_type,
+                    requirements,
                 )
             except Exception:
-                fallback = build_fallback_analysis(working_text)
+                fallback = build_fallback_analysis(working_text, requirements)
                 yield sse_event("risk_score", {"risk_score": fallback.risk_score})
+                yield sse_event(
+                    "compatibility_score",
+                    {"compatibility_score": fallback.compatibility_score},
+                )
+                yield sse_event(
+                    "verdict",
+                    {
+                        "verdict": fallback.verdict,
+                        "verdict_reason": fallback.verdict_reason,
+                    },
+                )
                 for clause in fallback.safe_clauses:
                     yield sse_event(
                         "safe_clause",
@@ -655,6 +773,14 @@ async def analyze_contract_stream(
                 return
 
             yield sse_event("risk_score", {"risk_score": risk_score})
+            yield sse_event(
+                "compatibility_score",
+                {"compatibility_score": compatibility_score},
+            )
+            yield sse_event(
+                "verdict",
+                {"verdict": verdict, "verdict_reason": verdict_reason},
+            )
             for clause in safe_clauses:
                 yield sse_event(
                     "safe_clause",
