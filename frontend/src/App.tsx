@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
-import { Upload, FileText, AlertTriangle, ShieldCheck } from 'lucide-react';
+import { Upload, FileText, AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, CheckCircle2, XCircle, Copy, Download, Loader2 } from 'lucide-react';
+import html2pdf from 'html2pdf.js';
 
 const CONTRACT_TYPES = [
   { id: 'employment', label: 'Employment Bond' },
@@ -13,9 +14,17 @@ const CONTRACT_TYPES = [
 type Severity = 'high' | 'medium' | 'low';
 type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 
+type RequirementMatch = {
+  requirement: string;
+  met: boolean;
+  explanation: string;
+};
+
 type FlaggedClause = {
   clause_title: string;
+  clause_text: string;
   plain_english_explanation: string;
+  negotiation_tip: string;
   severity: Severity;
 };
 
@@ -25,67 +34,43 @@ type SafeClause = {
 };
 
 type AnalyzeResult = {
-  risk_score: number;
-  compatibility_score: number;
-  verdict: Verdict;
-  verdict_reason: string;
+  risk_score: number | null;
+  compatibility_score: number | null;
+  verdict: Verdict | null;
+  verdict_reason: string | null;
+  requirement_breakdown: RequirementMatch[];
   red_flags: FlaggedClause[];
   safe_clauses: SafeClause[];
+  negotiation_email: string | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const SCORE_TONE_STYLES = {
-  green: {
-    badge: 'bg-emerald-100 text-emerald-700',
-    text: 'text-emerald-600',
-  },
-  amber: {
-    badge: 'bg-amber-100 text-amber-700',
-    text: 'text-amber-600',
-  },
-  red: {
-    badge: 'bg-red-100 text-red-700',
-    text: 'text-red-600',
-  },
+  green: { badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-600' },
+  amber: { badge: 'bg-amber-100 text-amber-700', text: 'text-amber-600' },
+  red: { badge: 'bg-red-100 text-red-700', text: 'text-red-600' },
+  gray: { badge: 'bg-slate-100 text-slate-700', text: 'text-slate-400' },
 } as const;
 
-const getRiskMeta = (score: number) => {
-  if (score <= 30) {
-    return { label: 'Safe', description: 'Low objective risk.', tone: 'green' as const };
-  }
-  if (score <= 60) {
-    return { label: 'Caution', description: 'Some risk worth reviewing.', tone: 'amber' as const };
-  }
+const getRiskMeta = (score: number | null) => {
+  if (score === null) return { label: 'Analyzing...', description: 'Waiting for Gemma...', tone: 'gray' as const };
+  if (score <= 30) return { label: 'Safe', description: 'Low objective risk.', tone: 'green' as const };
+  if (score <= 60) return { label: 'Caution', description: 'Some risk worth reviewing.', tone: 'amber' as const };
   return { label: 'Dangerous', description: 'High risk and major red flags.', tone: 'red' as const };
 };
 
-const getCompatibilityMeta = (score: number) => {
-  if (score <= 30) {
-    return { label: 'Low Match', description: 'Poor fit with your goals.', tone: 'red' as const };
-  }
-  if (score <= 60) {
-    return { label: 'Mixed Fit', description: 'Some alignment, some conflicts.', tone: 'amber' as const };
-  }
+const getCompatibilityMeta = (score: number | null) => {
+  if (score === null) return { label: 'Analyzing...', description: 'Waiting for Gemma...', tone: 'gray' as const };
+  if (score <= 30) return { label: 'Low Match', description: 'Poor fit with your goals.', tone: 'red' as const };
+  if (score <= 60) return { label: 'Mixed Fit', description: 'Some alignment, some conflicts.', tone: 'amber' as const };
   return { label: 'Strong Match', description: 'Aligned with your goals.', tone: 'green' as const };
 };
 
 const VERDICT_META = {
-  ACCEPT: {
-    label: 'ACCEPT',
-    description: 'Low risk and strong compatibility.',
-    tone: 'green' as const,
-  },
-  NEGOTIATE: {
-    label: 'NEGOTIATE',
-    description: 'Some red flags or goal conflicts.',
-    tone: 'amber' as const,
-  },
-  REJECT: {
-    label: 'REJECT',
-    description: 'High risk or poor compatibility.',
-    tone: 'red' as const,
-  },
+  ACCEPT: { label: 'ACCEPT', description: 'Low risk and strong compatibility.', tone: 'green' as const },
+  NEGOTIATE: { label: 'NEGOTIATE', description: 'Some red flags or goal conflicts.', tone: 'amber' as const },
+  REJECT: { label: 'REJECT', description: 'High risk or poor compatibility.', tone: 'red' as const },
 };
 
 function App() {
@@ -94,97 +79,135 @@ function App() {
   const [contractText, setContractText] = useState('');
   const [contractType, setContractType] = useState(CONTRACT_TYPES[0].id);
   const [requirements, setRequirements] = useState('');
+  
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<{ stage: string, message: string } | null>(null);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   
+  const [expandedFlags, setExpandedFlags] = useState<number[]>([]);
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const reportRef = useRef<HTMLDivElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
-    }
+    if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
-
+  const handleDragOver = (e: React.DragEvent) => e.preventDefault();
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setFile(e.dataTransfer.files[0]);
-    }
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  };
+
+  const toggleFlag = (index: number) => {
+    setExpandedFlags(prev => 
+      prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]
+    );
+  };
+
+  const handleDownloadPDF = () => {
+    if (!reportRef.current) return;
+    const opt = {
+      margin: 0.5,
+      filename: 'FinePrint_Analysis.pdf',
+      image: { type: 'jpeg' as const, quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true },
+      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+    };
+    html2pdf().set(opt).from(reportRef.current).save();
   };
 
   const handleAnalyze = async () => {
     const trimmedText = contractText.trim();
     const trimmedRequirements = requirements.trim();
 
-    if (inputMode === 'file' && !file) {
-      setError('Please upload a file.');
-      return;
-    }
-
-    if (inputMode === 'text' && !trimmedText) {
-      setError('Please paste the contract text.');
-      return;
-    }
+    if (inputMode === 'file' && !file) return setError('Please upload a file.');
+    if (inputMode === 'text' && !trimmedText) return setError('Please paste the contract text.');
 
     setIsAnalyzing(true);
     setError(null);
-    setResult(null);
+    setStreamStatus(null);
+    setExpandedFlags([]);
+    setResult({
+      risk_score: null, compatibility_score: null, verdict: null, verdict_reason: null,
+      requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null
+    });
 
     const formData = new FormData();
     formData.append('contract_type', contractType);
-    if (inputMode === 'file' && file) {
-      formData.append('file', file);
-    }
-    if (inputMode === 'text') {
-      formData.append('text', trimmedText);
-    }
-    if (trimmedRequirements) {
-      formData.append('requirements', trimmedRequirements);
-    }
+    if (inputMode === 'file' && file) formData.append('file', file);
+    if (inputMode === 'text') formData.append('text', trimmedText);
+    if (trimmedRequirements) formData.append('requirements', trimmedRequirements);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/analyze`, {
+      const response = await fetch(`${API_BASE_URL}/analyze/stream`, {
         method: 'POST',
         body: formData,
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        let message = `Request failed (${response.status})`;
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      if (!response.body) throw new Error('ReadableStream not supported.');
 
-        if (errorText) {
-          try {
-            const payload = JSON.parse(errorText) as { detail?: string };
-            if (payload.detail) {
-              message = `${message}: ${payload.detail}`;
-            } else {
-              message = `${message}: ${errorText}`;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let partialData = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        partialData += decoder.decode(value, { stream: true });
+        const lines = partialData.split('\n\n');
+        partialData = lines.pop() || '';
+
+        for (const block of lines) {
+          if (!block.trim()) continue;
+          
+          const eventMatch = block.match(/event:\s*(.*)/);
+          const dataMatch = block.match(/data:\s*(.*)/);
+          
+          if (eventMatch && dataMatch) {
+            const eventType = eventMatch[1].trim();
+            const payload = JSON.parse(dataMatch[1].trim());
+
+            if (eventType === 'status') setStreamStatus(payload);
+            else if (eventType === 'error') throw new Error(payload.detail);
+            else if (eventType === 'done') {
+              setIsAnalyzing(false);
+              setStreamStatus(null);
             }
-          } catch {
-            message = `${message}: ${errorText}`;
+            else {
+              setResult(prev => {
+                if (!prev) return prev;
+                const next = { ...prev };
+                if (eventType === 'risk_score') next.risk_score = payload.risk_score;
+                if (eventType === 'compatibility_score') next.compatibility_score = payload.compatibility_score;
+                if (eventType === 'verdict') {
+                  next.verdict = payload.verdict;
+                  next.verdict_reason = payload.verdict_reason;
+                }
+                if (eventType === 'requirement_match') next.requirement_breakdown = [...next.requirement_breakdown, payload];
+                if (eventType === 'safe_clause') next.safe_clauses = [...next.safe_clauses, payload];
+                if (eventType === 'red_flag') next.red_flags = [...next.red_flags, payload];
+                if (eventType === 'negotiation_email') next.negotiation_email = payload.email;
+                return next;
+              });
+            }
           }
         }
-
-        throw new Error(message);
       }
-
-      const data = (await response.json()) as AnalyzeResult;
-      setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected error');
+      setStreamStatus(null);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const riskMeta = getRiskMeta(result?.risk_score ?? 0);
-  const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? 0);
-  const verdictMeta = result ? VERDICT_META[result.verdict] ?? VERDICT_META.NEGOTIATE : VERDICT_META.NEGOTIATE;
+  const riskMeta = getRiskMeta(result?.risk_score ?? null);
+  const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
+  const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
@@ -194,7 +217,7 @@ function App() {
             <FileText className="text-blue-600 w-6 h-6" />
             <h1 className="text-xl font-bold text-slate-900 tracking-tight">FinePrint</h1>
           </div>
-          <div className="text-sm font-medium text-slate-500">Harvey AI for the rest of us</div>
+          <div className="text-sm font-medium text-slate-500">Tarkash Labs x Gemma 4</div>
         </div>
       </header>
 
@@ -203,40 +226,22 @@ function App() {
           <div className="space-y-6 max-w-2xl mx-auto">
             <div className="text-center space-y-2 mb-8">
               <h2 className="text-3xl font-extrabold text-slate-900">Analyze your contract in seconds</h2>
-              <p className="text-slate-500">Upload a photo or PDF, or paste text, to instantly identify risks and understand exactly what you are signing.</p>
+              <p className="text-slate-500">Upload a photo or PDF to instantly identify hidden traps.</p>
             </div>
 
             <div className="flex items-center justify-center">
               <div className="inline-flex rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
                 <button
                   type="button"
-                  onClick={() => {
-                    setInputMode('file');
-                    setContractText('');
-                    setError(null);
-                    setResult(null);
-                  }}
-                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${
-                    inputMode === 'file'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
+                  onClick={() => { setInputMode('file'); setContractText(''); setError(null); }}
+                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${inputMode === 'file' ? 'bg-blue-600 text-white' : 'text-slate-600'}`}
                 >
                   Upload File
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setInputMode('text');
-                    setFile(null);
-                    setError(null);
-                    setResult(null);
-                  }}
-                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${
-                    inputMode === 'text'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
+                  onClick={() => { setInputMode('text'); setFile(null); setError(null); }}
+                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${inputMode === 'text' ? 'bg-blue-600 text-white' : 'text-slate-600'}`}
                 >
                   Paste Text
                 </button>
@@ -245,144 +250,140 @@ function App() {
 
             {inputMode === 'file' ? (
               <div 
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-                className="border-2 border-dashed border-slate-300 rounded-2xl bg-white p-10 flex flex-col items-center justify-center gap-4 hover:bg-slate-50 transition-colors cursor-pointer"
-                onClick={() => fileInputRef.current?.click()}
+                onDragOver={handleDragOver} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed border-slate-300 rounded-2xl bg-white p-10 flex flex-col items-center justify-center gap-4 hover:bg-slate-50 cursor-pointer"
               >
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  className="hidden" 
-                  accept="image/*,application/pdf"
-                  onChange={handleFileChange}
-                />
+                <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileChange} />
                 <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center text-blue-600 mb-2">
                   <Upload className="w-8 h-8" />
                 </div>
                 <div className="text-center">
-                  <p className="text-lg font-medium text-slate-900">
-                    {file ? file.name : "Click or drag to upload"}
-                  </p>
-                  <p className="text-sm text-slate-500 mt-1">
-                    Supports Images (PNG, JPG) and PDFs
-                  </p>
+                  <p className="text-lg font-medium text-slate-900">{file ? file.name : "Click or drag to upload"}</p>
                 </div>
               </div>
             ) : (
               <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm">
                 <label className="block text-sm font-semibold text-slate-700 mb-2">Paste Contract Text</label>
                 <textarea
-                  value={contractText}
-                  onChange={(e) => setContractText(e.target.value)}
-                  rows={8}
+                  value={contractText} onChange={(e) => setContractText(e.target.value)} rows={8}
                   className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Paste the contract text here..."
                 />
-                <p className="text-xs text-slate-500 mt-2">Tip: You can paste job descriptions or offer letters to review quickly.</p>
               </div>
             )}
 
             <div className="space-y-3">
               <label className="block text-sm font-semibold text-slate-700">Contract Type</label>
-              <select 
-                value={contractType}
-                onChange={(e) => setContractType(e.target.value)}
-                className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-              >
-                {CONTRACT_TYPES.map(type => (
-                  <option key={type.id} value={type.id}>{type.label}</option>
-                ))}
+              <select value={contractType} onChange={(e) => setContractType(e.target.value)} className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500">
+                {CONTRACT_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
               </select>
             </div>
 
             <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm">
               <label className="block text-sm font-semibold text-slate-700 mb-2">Your Requirements</label>
               <textarea
-                value={requirements}
-                onChange={(e) => setRequirements(e.target.value)}
-                rows={4}
-                className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Example: I plan to stay 2 years, want to keep my side project, avoid a non-compete, and prefer remote-friendly roles."
+                value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={3}
+                placeholder="Example: I plan to stay 2 years, want to keep my side project..."
+                className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
               />
-              <p className="text-xs text-slate-500 mt-2">Used to compute compatibility and the final verdict.</p>
             </div>
 
             <button 
               onClick={handleAnalyze}
-              disabled={
-                isAnalyzing ||
-                (inputMode === 'file' ? !file : contractText.trim().length === 0)
-              }
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-lg px-4 py-3 shadow-sm transition-all"
+              disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-lg px-4 py-3 shadow-sm transition-all"
             >
-              {isAnalyzing ? 'Analyzing with Gemma 4...' : 'Analyze Contract'}
+              Analyze Contract
             </button>
-            {error ? (
+
+            {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+          </div>
+        ) : (
+          <div className="space-y-8" ref={reportRef}>
+            <div className="flex items-center justify-between border-b pb-4">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-3">
+                  Analysis Results
+                  <span className="text-xs bg-slate-200 text-slate-600 px-2 py-1 rounded-full uppercase tracking-wider">
+                    {CONTRACT_TYPES.find(c => c.id === contractType)?.label}
+                  </span>
+                </h2>
+                {isAnalyzing && streamStatus && (
+                  <p className="text-sm text-blue-600 mt-2 flex items-center gap-2 font-medium">
+                    <Loader2 className="w-4 h-4 animate-spin" /> {streamStatus.message}
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button onClick={handleDownloadPDF} disabled={isAnalyzing} className="text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
+                  <Download className="w-4 h-4" /> Export PDF
+                </button>
+                <button onClick={() => { setResult(null); setFile(null); setError(null); setContractText(''); }} className="text-sm font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded-lg transition">
+                  New Analysis
+                </button>
+              </div>
+            </div>
+
+            {error && (
               <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
               </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="space-y-8">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold">Analysis Results</h2>
-              <button 
-                onClick={() => {
-                  setResult(null);
-                  setFile(null);
-                  setError(null);
-                  setContractText('');
-                }}
-                className="text-sm font-medium text-blue-600 hover:text-blue-800"
-              >
-                Start New Analysis
-              </button>
-            </div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-3">
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Risk Score</h3>
-                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[riskMeta.tone].badge}`}>
-                    {riskMeta.label}
-                  </span>
+              {/* Risk Score */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Risk Score</h3>
+                    <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[riskMeta.tone].badge}`}>{riskMeta.label}</span>
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className={`text-5xl font-extrabold ${SCORE_TONE_STYLES[riskMeta.tone].text}`}>
+                      {result.risk_score !== null ? result.risk_score : '--'}
+                    </span>
+                    <span className="text-sm text-slate-500">/ 100</span>
+                  </div>
                 </div>
-                <div className="mt-4 flex items-baseline gap-2">
-                  <span className={`text-4xl font-extrabold ${SCORE_TONE_STYLES[riskMeta.tone].text}`}>
-                    {result.risk_score}
-                  </span>
-                  <span className="text-sm text-slate-500">/ 100</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-600">{riskMeta.description}</p>
+                <p className="mt-4 text-sm text-slate-600">{riskMeta.description}</p>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+              {/* Compatibility Score & Checklist */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Compatibility</h3>
-                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[compatibilityMeta.tone].badge}`}>
-                    {compatibilityMeta.label}
-                  </span>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[compatibilityMeta.tone].badge}`}>{compatibilityMeta.label}</span>
                 </div>
                 <div className="mt-4 flex items-baseline gap-2">
-                  <span className={`text-4xl font-extrabold ${SCORE_TONE_STYLES[compatibilityMeta.tone].text}`}>
-                    {result.compatibility_score}
+                  <span className={`text-5xl font-extrabold ${SCORE_TONE_STYLES[compatibilityMeta.tone].text}`}>
+                    {result.compatibility_score !== null ? result.compatibility_score : '--'}
                   </span>
                   <span className="text-sm text-slate-500">/ 100</span>
                 </div>
-                <p className="mt-2 text-sm text-slate-600">{compatibilityMeta.description}</p>
+                <div className="mt-4 space-y-2 flex-grow border-t pt-3">
+                  {result.requirement_breakdown.length > 0 ? (
+                    result.requirement_breakdown.map((req, i) => (
+                      <div key={i} className="flex items-start gap-2 text-sm">
+                        {req.met ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" /> : <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
+                        <span className={req.met ? "text-slate-700" : "text-red-700 font-medium"}>{req.requirement}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-400 italic">No specific requirements analyzed.</p>
+                  )}
+                </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+              {/* Verdict */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Final Verdict</h3>
-                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[verdictMeta.tone].badge}`}>
-                    {verdictMeta.label}
-                  </span>
+                  {verdictMeta && <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[verdictMeta.tone].badge}`}>{verdictMeta.label}</span>}
                 </div>
-                <p className="mt-4 text-sm text-slate-600">{verdictMeta.description}</p>
-                <p className="mt-3 text-sm font-semibold text-slate-900">{result.verdict_reason}</p>
+                <div className="mt-4 flex-grow">
+                  <p className="text-sm font-semibold text-slate-900 leading-relaxed text-lg">
+                    {result.verdict_reason || (isAnalyzing ? "Computing verdict..." : "")}
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -390,37 +391,104 @@ function App() {
               <h3 className="font-bold flex items-center gap-2 text-slate-800 border-b pb-2">
                 <AlertTriangle className="w-5 h-5 text-red-500" />
                 Red Flags ({result.red_flags.length})
+                {isAnalyzing && <span className="ml-2 text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded animate-pulse">Extracting via MoE...</span>}
               </h3>
+              
               <div className="grid gap-4">
-                {result.red_flags.map((flag, i) => (
-                  <div key={i} className="bg-red-50 border border-red-100 rounded-xl p-5">
-                    <div className="flex justify-between items-start mb-2">
-                      <h4 className="font-semibold text-red-900">{flag.clause_title}</h4>
-                      <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded capitalize">
-                        {flag.severity}
-                      </span>
+                {result.red_flags.map((flag, i) => {
+                  const isExpanded = expandedFlags.includes(i);
+                  return (
+                    <div key={i} className="bg-white border border-red-200 rounded-xl overflow-hidden shadow-sm transition-all hover:border-red-300">
+                      <div 
+                        className="p-5 flex justify-between items-start cursor-pointer bg-red-50/50"
+                        onClick={() => toggleFlag(i)}
+                      >
+                        <div className="flex-grow pr-4">
+                          <div className="flex items-center gap-3 mb-2">
+                            <h4 className="font-semibold text-red-900 text-lg">{flag.clause_title}</h4>
+                            <span className="bg-red-100 text-red-700 text-[10px] font-bold px-2 py-0.5 rounded uppercase">{flag.severity}</span>
+                          </div>
+                          <p className="text-slate-700 text-sm leading-relaxed">{flag.plain_english_explanation}</p>
+                        </div>
+                        <button className="text-red-400 hover:text-red-600 p-1">
+                          {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                        </button>
+                      </div>
+                      
+                      {isExpanded && (
+                        <div className="p-5 border-t border-red-100 bg-white space-y-4">
+                          <div>
+                            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 block">Original Contract Text</span>
+                            <div className="bg-slate-50 border border-slate-200 p-3 rounded-lg text-sm font-mono text-slate-600 whitespace-pre-wrap">
+                              "{flag.clause_text}"
+                            </div>
+                          </div>
+                          <div className="bg-amber-50 border border-amber-200 p-4 rounded-lg flex items-start gap-3">
+                            <div className="text-amber-800 text-sm">
+                              <span className="font-bold uppercase text-xs tracking-wider block mb-1">💡 How to Negotiate</span>
+                              {flag.negotiation_tip}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-red-800/80 text-sm leading-relaxed">{flag.plain_english_explanation}</p>
+                  );
+                })}
+                {!isAnalyzing && result.red_flags.length === 0 && (
+                  <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl text-slate-500">
+                    No major red flags found.
                   </div>
-                ))}
+                )}
               </div>
             </div>
 
-            <div className="space-y-4">
+            {/* Email Generator UI */}
+            {(!isAnalyzing || result.negotiation_email) && result.red_flags.length > 0 && (
+              <div className="space-y-4 mt-8 bg-blue-50/50 p-6 rounded-2xl border border-blue-100">
+                 <div className="flex items-center justify-between border-b border-blue-200 pb-2">
+                    <h3 className="font-bold flex items-center gap-2 text-blue-900">
+                      Draft Negotiation Email
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">Gemma 27B</span>
+                    </h3>
+                    {result.negotiation_email && (
+                      <button 
+                        onClick={() => navigator.clipboard.writeText(result.negotiation_email || '')}
+                        className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                      >
+                        <Copy className="w-4 h-4" /> Copy Text
+                      </button>
+                    )}
+                 </div>
+                 {result.negotiation_email ? (
+                   <div className="bg-white border border-blue-200 rounded-lg p-5 text-sm text-slate-700 whitespace-pre-wrap font-serif leading-relaxed shadow-inner">
+                     {result.negotiation_email}
+                   </div>
+                 ) : (
+                   <p className="text-sm text-slate-500 italic">Email draft will appear here...</p>
+                 )}
+              </div>
+            )}
+
+            <div className="space-y-4 pt-4">
               <h3 className="font-bold flex items-center gap-2 text-slate-800 border-b pb-2">
                 <ShieldCheck className="w-5 h-5 text-green-500" />
                 Safe Clauses ({result.safe_clauses.length})
               </h3>
-              <div className="grid gap-4">
+              <div className="grid gap-4 md:grid-cols-2">
                 {result.safe_clauses.map((clause, i) => (
-                  <div key={i} className="bg-green-50 border border-green-100 rounded-xl p-5">
-                    <h4 className="font-semibold text-green-900 mb-1">{clause.clause_title}</h4>
-                    <p className="text-green-800/80 text-sm leading-relaxed">{clause.plain_english_explanation}</p>
+                  <div key={i} className="bg-green-50/50 border border-green-100 rounded-xl p-4">
+                    <h4 className="font-semibold text-green-900 mb-1 text-sm">{clause.clause_title}</h4>
+                    <p className="text-green-800/80 text-xs leading-relaxed">{clause.plain_english_explanation}</p>
                   </div>
                 ))}
+                {!isAnalyzing && result.safe_clauses.length === 0 && (
+                  <div className="col-span-full text-center py-6 border-2 border-dashed border-red-200 bg-red-50 rounded-xl text-red-600 font-medium">
+                    No safe clauses found. This contract is heavily one-sided.
+                  </div>
+                )}
               </div>
             </div>
-            
+
           </div>
         )}
       </main>

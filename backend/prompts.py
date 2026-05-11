@@ -4,29 +4,39 @@ OCR_PROMPT = (
 )
 
 def _build_analysis_prompt(contract_label: str, focus_areas: str, requirements: str) -> str:
-  requirements_text = requirements.strip() or "Not provided."
+  requirements_text = requirements.strip() or "None provided."
   return f"""
-You are a legal expert specializing in {contract_label} contracts.
+You are a ruthless, detail-oriented legal expert specializing in {contract_label} contracts. Your job is to protect the user.
 Analyze this contract and return a JSON with exactly these fields:
 {{
   "risk_score": <integer 0-100>,
   "compatibility_score": <integer 0-100>,
   "verdict": "ACCEPT" | "NEGOTIATE" | "REJECT",
-  "verdict_reason": "<1-2 sentence explanation referencing the user's requirements and key clauses>",
-  "red_flags": [{{"clause_title": "...", "clause_text": "...", "plain_english_explanation": "...", "severity": "high|medium|low"}}],
+  "verdict_reason": "<1-2 sentence explanation referencing requirements and clauses>",
+  "requirement_breakdown": [
+    {{"requirement": "<specific user requirement>", "met": true/false, "explanation": "<why it was or wasn't met>"}}
+  ],
+  "red_flags": [
+    {{
+      "clause_title": "...", 
+      "clause_text": "<EXACT text from the contract>", 
+      "plain_english_explanation": "...", 
+      "negotiation_tip": "<Actionable advice on what the user should ask to change>",
+      "severity": "high|medium|low"
+    }}
+  ],
   "safe_clauses": [{{"clause_title": "...", "plain_english_explanation": "..."}}]
 }}
-Return only valid JSON. No preamble. Do not use markdown blocks, just raw JSON.
-For red flags, include the exact clause text in "clause_text".
-The risk score is objective and should not use the user's requirements.
-Focus on {focus_areas}.
 
-User requirements:
+CRITICAL RULES:
+1. Return ONLY valid JSON. No preamble. No markdown blocks.
+2. DETECT ALL RED FLAGS. Do not summarize them into one. If there are 5 bad clauses, list 5 red flags.
+3. You MUST extract the exact original text for "clause_text". 
+4. The "risk_score" is objective based on standard legal risks. Focus heavily on: {focus_areas}.
+5. The "compatibility_score" MUST directly reflect the User Requirements below. If a requirement is completely violated, the compatibility score must drop significantly.
+
+User Requirements to evaluate against:
 {requirements_text}
-
-Compatibility scoring rules:
-- If requirements are missing or empty, set "compatibility_score" to 50.
-- Otherwise, score based on alignment with the requirements (conflicts lower the score).
 
 Verdict guidance:
 - ACCEPT when risk <= 30 and compatibility >= 70.
@@ -60,13 +70,14 @@ def get_contract_prompt(contract_type: str, requirements: str | None) -> str:
 EXPLANATION_SYSTEM_PROMPT_TEMPLATE = "You are a legal expert specializing in {contract_label} contracts."
 
 EXPLANATION_PROMPT_TEMPLATE = """
-Rewrite the clause in plain English for a non-lawyer.
+Rewrite the following clause in plain English for a non-lawyer.
 Keep it concise (2-4 sentences) and focus on practical impact.
 Return only the explanation text.
 
 Clause title: {clause_title}
 Clause text: {clause_text}
 """.strip()
+
 SUMMARY_CHUNK_PROMPT = """
 Summarize the contract text below into concise plain text.
 Preserve key clauses, obligations, penalties, and timelines.
@@ -76,4 +87,13 @@ Do not analyze or assign a risk score. Do not use bullet points or JSON.
 SUMMARY_COMBINE_PROMPT = """
 Combine the summaries below into a single concise contract text.
 Preserve key clauses and details. Do not analyze or use bullet points.
+""".strip()
+
+NEGOTIATION_EMAIL_PROMPT = """
+You are a professional negotiator. Based on the following contract red flags, write a polite, professional, and firm email to the counterparty requesting changes to the contract.
+Do not be overly aggressive, but stand your ground. 
+Format it with clear spacing. Do not include a subject line, just start with "Dear [Name/Hiring Manager],"
+
+Red Flags to address:
+{flags_text}
 """.strip()

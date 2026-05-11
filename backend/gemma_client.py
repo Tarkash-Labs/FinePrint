@@ -20,6 +20,7 @@ class GemmaClient:
         contents: list | str | Any,
         system_instruction: str | None = None,
         temperature: float = 0.2,
+        response_mime_type: str | None = None,
     ) -> str:
         if not self.api_key:
             raise GemmaClientError("Missing GEMMA_API_KEY")
@@ -27,19 +28,31 @@ class GemmaClient:
         if self.client is None:
             self.client = genai.Client(api_key=self.api_key)
 
+        # THE FIX: Gemma models reject the 'system_instruction' config parameter.
+        # We manually intercept it and prepend it to the user's prompt.
+        final_contents = contents
+        if system_instruction:
+            if isinstance(contents, str):
+                final_contents = f"{system_instruction}\n\n{contents}"
+            elif isinstance(contents, list):
+                final_contents = [f"{system_instruction}\n\n"] + contents
+            else:
+                final_contents = f"{system_instruction}\n\n{str(contents)}"
+
         config_args = {
             "temperature": temperature,
         }
         
-        if system_instruction:
-            config_args["system_instruction"] = system_instruction
+        # Enforce JSON output if requested
+        if response_mime_type:
+            config_args["response_mime_type"] = response_mime_type
             
         config = types.GenerateContentConfig(**config_args)
 
         try:
             response = self.client.models.generate_content(
                 model=model,
-                contents=contents,
+                contents=final_contents,
                 config=config,
             )
             if not response.text:
