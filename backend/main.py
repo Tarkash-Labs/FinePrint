@@ -1,18 +1,23 @@
 import base64
 import binascii
+import json
 import os
 import re
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
-from typing import List
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Any, Iterator, List
 
 from config import settings
 from gemma_client import GemmaClient, GemmaClientError
 from prompts import (
+    CONTRACT_ANALYSIS_PROMPTS,
+    CONTRACT_TYPE_LABELS,
+    EXPLANATION_PROMPT_TEMPLATE,
+    EXPLANATION_SYSTEM_PROMPT_TEMPLATE,
     OCR_PROMPT,
-    EMPLOYMENT_BOND_SYSTEM_PROMPT,
     SUMMARY_CHUNK_PROMPT,
     SUMMARY_COMBINE_PROMPT,
 )
@@ -28,9 +33,8 @@ SUPPORTED_MIME_TYPES = {
     "application/pdf",
 }
 
-CONTRACT_PROMPTS = {
-    "employment": EMPLOYMENT_BOND_SYSTEM_PROMPT,
-}
+CONTRACT_PROMPTS = CONTRACT_ANALYSIS_PROMPTS
+CONTRACT_LABELS = CONTRACT_TYPE_LABELS
 
 gemma_client = GemmaClient(
     api_key=settings.api_key,
@@ -86,6 +90,88 @@ def decode_base64_payload(payload: str, mime_type: str | None) -> tuple[bytes, s
 
     return decoded, detected_mime
 
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+def normalize_severity(value: Any) -> str:
+    normalized = normalize_text(value).lower()
+    if normalized in {"high", "medium", "low"}:
+        return normalized
+    return "medium"
+
+def parse_analysis_payload(payload: dict) -> tuple[int, list[dict], list[dict]]:
+    raw_score = payload.get("risk_score", payload.get("riskScore", 0))
+    try:
+        risk_score = int(raw_score)
+    except (TypeError, ValueError):
+        risk_score = 0
+    risk_score = max(0, min(100, risk_score))
+
+    raw_red_flags = payload.get("red_flags", payload.get("redFlags", []))
+    raw_safe_clauses = payload.get("safe_clauses", payload.get("safeClauses", []))
+
+    red_flags: list[dict] = []
+    if isinstance(raw_red_flags, list):
+        for entry in raw_red_flags:
+            if isinstance(entry, str):
+                red_flags.append(
+                    {
+                        "clause_title": entry.strip() or "Untitled clause",
+                        "clause_text": "",
+                        "plain_english_explanation": entry.strip(),
+                        "severity": "medium",
+                    }
+                )
+                continue
+            if not isinstance(entry, dict):
+                continue
+            red_flags.append(
+                {
+                    "clause_title": normalize_text(
+                        entry.get("clause_title") or entry.get("title")
+                    )
+                    or "Untitled clause",
+                    "clause_text": normalize_text(
+                        entry.get("clause_text") or entry.get("clause")
+                    ),
+                    "plain_english_explanation": normalize_text(
+                        entry.get("plain_english_explanation")
+                        or entry.get("explanation")
+                    ),
+                    "severity": normalize_severity(entry.get("severity")),
+                }
+            )
+
+    safe_clauses: list[dict] = []
+    if isinstance(raw_safe_clauses, list):
+        for entry in raw_safe_clauses:
+            if isinstance(entry, str):
+                safe_clauses.append(
+                    {
+                        "clause_title": entry.strip() or "Safe clause",
+                        "plain_english_explanation": entry.strip(),
+                    }
+                )
+                continue
+            if not isinstance(entry, dict):
+                continue
+            safe_clauses.append(
+                {
+                    "clause_title": normalize_text(
+                        entry.get("clause_title") or entry.get("title")
+                    )
+                    or "Safe clause",
+                    "plain_english_explanation": normalize_text(
+                        entry.get("plain_english_explanation")
+                        or entry.get("explanation")
+                    ),
+                }
+            )
+
+    return risk_score, red_flags, safe_clauses
+
 def summarize_contract_text(text: str) -> str:
     chunks = chunk_text(text, settings.summary_chunk_chars)
     if len(chunks) <= 1:
@@ -109,6 +195,156 @@ def summarize_contract_text(text: str) -> str:
         contents=combine_prompt,
         temperature=0.2,
     )
+
+def maybe_summarize_contract_text(text: str) -> str:
+    if len(text) <= settings.summary_trigger_chars:
+        return text
+    try:
+        return summarize_contract_text(text)
+    except GemmaClientError:
+        return clamp_text(text, settings.summary_chunk_chars)
+
+async def read_contract_text(
+    file: UploadFile | None,
+    text: str | None,
+    base64_image: str | None,
+    base64_mime_type: str | None,
+) -> str:
+    trimmed_text = (text or "").strip()
+    if trimmed_text:
+        return clamp_text(trimmed_text, settings.max_contract_chars)
+
+    if file is None and not base64_image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide a file, base64 payload, or contract text",
+        )
+
+    content_type: str | None = None
+    contents: bytes
+
+    if file is not None:
+        content_type = file.content_type
+        if not content_type:
+            ext = os.path.splitext(file.filename or "")[1].lower()
+            ext_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".pdf": "application/pdf",
+            }
+            content_type = ext_map.get(ext, "application/octet-stream")
+
+        max_upload_bytes = settings.max_upload_bytes
+        upload_size = get_upload_size(file)
+        if upload_size is not None and upload_size > max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    "Uploaded file is too large. "
+                    f"Max size is {format_megabytes(max_upload_bytes)}."
+                ),
+            )
+
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is empty",
+            )
+    else:
+        contents, content_type = decode_base64_payload(
+            base64_image or "",
+            base64_mime_type,
+        )
+
+    if content_type not in SUPPORTED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported file type. Use PNG, JPG, WEBP, or PDF.",
+        )
+
+    max_upload_bytes = settings.max_upload_bytes
+    if len(contents) > max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                "Uploaded file is too large. "
+                f"Max size is {format_megabytes(max_upload_bytes)}."
+            ),
+        )
+
+    from google.genai import types
+    ocr_contents = [
+        types.Part.from_bytes(data=contents, mime_type=content_type),
+        OCR_PROMPT,
+    ]
+
+    try:
+        extracted_text = gemma_client.generate_content(
+            model=settings.e4b_model,
+            contents=ocr_contents,
+            temperature=0.0,
+        )
+    except GemmaClientError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        )
+
+    return clamp_text(extracted_text, settings.max_contract_chars)
+
+def run_moe_analysis(contract_text: str, contract_type: str) -> tuple[int, list[dict], list[dict]]:
+    analysis_contents = f"Contract text:\n{contract_text}"
+    analysis_prompt = f"{CONTRACT_PROMPTS[contract_type]}\n\n{analysis_contents}"
+
+    try:
+        analysis_text = gemma_client.generate_content(
+            model=settings.moe_model,
+            contents=analysis_contents,
+            system_instruction=CONTRACT_PROMPTS[contract_type],
+            temperature=0.2,
+        )
+    except GemmaClientError as exc:
+        error_text = str(exc)
+        if "INTERNAL" in error_text or "500" in error_text:
+            analysis_text = gemma_client.generate_content(
+                model=settings.moe_model,
+                contents=analysis_prompt,
+                temperature=0.2,
+            )
+        else:
+            raise
+
+    payload = extract_json_object(analysis_text)
+    risk_score, red_flags, safe_clauses = parse_analysis_payload(payload)
+    if not red_flags and not safe_clauses:
+        raise ValueError("Empty analysis payload")
+    if risk_score >= 50 and not red_flags:
+        raise ValueError("High risk without red flags")
+    return risk_score, red_flags, safe_clauses
+
+def explain_red_flag(contract_type: str, flag: dict) -> str:
+    clause_title = flag.get("clause_title", "")
+    clause_text = flag.get("clause_text") or flag.get("plain_english_explanation") or clause_title
+    label = CONTRACT_LABELS.get(contract_type, contract_type)
+    system_prompt = EXPLANATION_SYSTEM_PROMPT_TEMPLATE.format(contract_label=label)
+    prompt = EXPLANATION_PROMPT_TEMPLATE.format(
+        clause_title=clause_title,
+        clause_text=clause_text,
+    )
+
+    response = gemma_client.generate_content(
+        model=settings.dense_model,
+        contents=prompt,
+        system_instruction=system_prompt,
+        temperature=0.2,
+    )
+    return response.strip()
+
+def sse_event(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
 # Add CORS middleware
@@ -271,140 +507,198 @@ async def analyze_contract(
     if contract_type not in CONTRACT_PROMPTS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only employment bond analysis is supported right now",
+            detail="Unsupported contract type",
         )
-
-    trimmed_text = (text or "").strip()
-    if trimmed_text:
-        contract_text = clamp_text(trimmed_text, settings.max_contract_chars)
-    else:
-        if file is None and not base64_image:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Provide a file, base64 payload, or contract text",
-            )
-
-        content_type: str | None = None
-        contents: bytes
-
-        if file is not None:
-            content_type = file.content_type
-            if not content_type:
-                ext = os.path.splitext(file.filename or "")[1].lower()
-                ext_map = {
-                    ".png": "image/png",
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".webp": "image/webp",
-                    ".pdf": "application/pdf",
-                }
-                content_type = ext_map.get(ext, "application/octet-stream")
-
-            max_upload_bytes = settings.max_upload_bytes
-            upload_size = get_upload_size(file)
-            if upload_size is not None and upload_size > max_upload_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=(
-                        "Uploaded file is too large. "
-                        f"Max size is {format_megabytes(max_upload_bytes)}."
-                    ),
-                )
-
-            contents = await file.read()
-            if not contents:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Uploaded file is empty",
-                )
-        else:
-            contents, content_type = decode_base64_payload(
-                base64_image or "",
-                base64_mime_type,
-            )
-
-        if content_type not in SUPPORTED_MIME_TYPES:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported file type. Use PNG, JPG, WEBP, or PDF.",
-            )
-
-        max_upload_bytes = settings.max_upload_bytes
-        if len(contents) > max_upload_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=(
-                    "Uploaded file is too large. "
-                    f"Max size is {format_megabytes(max_upload_bytes)}."
-                ),
-            )
-
-        from google.genai import types
-        ocr_contents = [
-            types.Part.from_bytes(data=contents, mime_type=content_type),
-            OCR_PROMPT
-        ]
-
-        try:
-            extracted_text = gemma_client.generate_content(
-                model=settings.e4b_model,
-                contents=ocr_contents,
-                temperature=0.0,
-            )
-        except GemmaClientError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=str(exc),
-            )
-
-        contract_text = clamp_text(extracted_text, settings.max_contract_chars)
-
-    if len(contract_text) > settings.summary_trigger_chars:
-        try:
-            contract_text = summarize_contract_text(contract_text)
-        except GemmaClientError:
-            contract_text = clamp_text(contract_text, settings.summary_chunk_chars)
-
-    analysis_contents = f"Contract text:\n{contract_text}"
-    analysis_prompt = f"{CONTRACT_PROMPTS[contract_type]}\n\n{analysis_contents}"
+    contract_text = await read_contract_text(
+        file=file,
+        text=text,
+        base64_image=base64_image,
+        base64_mime_type=base64_mime_type,
+    )
+    contract_text = maybe_summarize_contract_text(contract_text)
 
     try:
-        analysis_text = gemma_client.generate_content(
-            model=settings.moe_model,
-            contents=analysis_contents,
-            system_instruction=CONTRACT_PROMPTS[contract_type],
-            temperature=0.2,
+        risk_score, red_flags, safe_clauses = run_moe_analysis(
+            contract_text,
+            contract_type,
         )
-    except GemmaClientError as exc:
-        error_text = str(exc)
-        if "INTERNAL" in error_text or "500" in error_text:
-            # Retry by inlining the system prompt to avoid model/system config issues.
-            try:
-                analysis_text = gemma_client.generate_content(
-                    model=settings.moe_model,
-                    contents=analysis_prompt,
-                    temperature=0.2,
-                )
-            except GemmaClientError:
-                return build_fallback_analysis(contract_text)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=error_text,
-            )
-
-    try:
-        payload = extract_json_object(analysis_text)
     except Exception:
         return build_fallback_analysis(contract_text)
 
-    try:
-        return AnalyzeResponse(**payload)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Invalid JSON schema: {exc}",
+    final_red_flags: list[FlaggedClause] = []
+    for flag in red_flags:
+        explanation = flag.get("plain_english_explanation", "")
+        try:
+            explanation = explain_red_flag(contract_type, flag)
+        except GemmaClientError:
+            if not explanation:
+                explanation = "Could not generate a plain-English explanation."
+
+        final_red_flags.append(
+            FlaggedClause(
+                clause_title=flag.get("clause_title", "Untitled clause"),
+                plain_english_explanation=explanation,
+                severity=flag.get("severity", "medium"),
+            )
         )
+
+    final_safe_clauses: list[SafeClause] = []
+    for clause in safe_clauses:
+        explanation = clause.get("plain_english_explanation") or "Appears reasonable."
+        final_safe_clauses.append(
+            SafeClause(
+                clause_title=clause.get("clause_title", "Safe clause"),
+                plain_english_explanation=explanation,
+            )
+        )
+
+    return AnalyzeResponse(
+        risk_score=risk_score,
+        red_flags=final_red_flags,
+        safe_clauses=final_safe_clauses,
+    )
+
+@app.post("/analyze/stream")
+async def analyze_contract_stream(
+    contract_type: str = Form(...),
+    file: UploadFile | None = File(None),
+    text: str | None = Form(None),
+    base64_image: str | None = Form(None),
+    base64_mime_type: str | None = Form(None),
+):
+    if not settings.api_key:
+        return StreamingResponse(
+            iter([
+                sse_event(
+                    "error",
+                    {"detail": "GEMMA_API_KEY is not configured"},
+                )
+            ]),
+            media_type="text/event-stream",
+        )
+
+    if contract_type not in CONTRACT_PROMPTS:
+        return StreamingResponse(
+            iter([
+                sse_event(
+                    "error",
+                    {"detail": "Unsupported contract type"},
+                )
+            ]),
+            media_type="text/event-stream",
+        )
+
+    try:
+        contract_text = await read_contract_text(
+            file=file,
+            text=text,
+            base64_image=base64_image,
+            base64_mime_type=base64_mime_type,
+        )
+    except HTTPException as exc:
+        return StreamingResponse(
+            iter([
+                sse_event(
+                    "error",
+                    {"detail": str(exc.detail)},
+                )
+            ]),
+            media_type="text/event-stream",
+        )
+
+    def event_stream() -> Iterator[str]:
+        try:
+            if len(contract_text) > settings.summary_trigger_chars:
+                yield sse_event(
+                    "status",
+                    {
+                        "stage": "summarize",
+                        "message": "Summarizing long contract...",
+                    },
+                )
+            working_text = maybe_summarize_contract_text(contract_text)
+
+            yield sse_event(
+                "status",
+                {
+                    "stage": "classify",
+                    "message": "Scoring risk and identifying clauses...",
+                },
+            )
+
+            try:
+                risk_score, red_flags, safe_clauses = run_moe_analysis(
+                    working_text,
+                    contract_type,
+                )
+            except Exception:
+                fallback = build_fallback_analysis(working_text)
+                yield sse_event("risk_score", {"risk_score": fallback.risk_score})
+                for clause in fallback.safe_clauses:
+                    yield sse_event(
+                        "safe_clause",
+                        {
+                            "clause_title": clause.clause_title,
+                            "plain_english_explanation": clause.plain_english_explanation,
+                        },
+                    )
+                for flag in fallback.red_flags:
+                    yield sse_event(
+                        "red_flag",
+                        {
+                            "clause_title": flag.clause_title,
+                            "plain_english_explanation": flag.plain_english_explanation,
+                            "severity": flag.severity,
+                        },
+                    )
+                yield sse_event("done", {"ok": True})
+                return
+
+            yield sse_event("risk_score", {"risk_score": risk_score})
+            for clause in safe_clauses:
+                yield sse_event(
+                    "safe_clause",
+                    {
+                        "clause_title": clause.get("clause_title"),
+                        "plain_english_explanation": clause.get("plain_english_explanation"),
+                    },
+                )
+
+            total_flags = len(red_flags)
+            for index, flag in enumerate(red_flags, start=1):
+                yield sse_event(
+                    "status",
+                    {
+                        "stage": "explain",
+                        "message": f"Explaining clause {index}/{total_flags}...",
+                    },
+                )
+
+                explanation = flag.get("plain_english_explanation", "")
+                try:
+                    explanation = explain_red_flag(contract_type, flag)
+                except GemmaClientError:
+                    if not explanation:
+                        explanation = "Could not generate a plain-English explanation."
+
+                yield sse_event(
+                    "red_flag",
+                    {
+                        "clause_title": flag.get("clause_title"),
+                        "plain_english_explanation": explanation,
+                        "severity": flag.get("severity"),
+                    },
+                )
+
+            yield sse_event("done", {"ok": True})
+        except Exception as exc:
+            yield sse_event("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 if __name__ == "__main__":
     import uvicorn
