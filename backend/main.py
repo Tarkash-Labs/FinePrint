@@ -4,6 +4,7 @@ import json
 import os
 import re
 import uuid
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 
@@ -242,14 +243,24 @@ def generate_negotiation_email(red_flags: list[dict], company_name: str, user_na
     if not red_flags:
         return "No major red flags detected. You are good to proceed!"
     
-    flags_summary = "\n".join([f"- {f.get('clause_title')}: {f.get('negotiation_tip')}" for f in red_flags])
+    flags_summary = "\n\n".join([
+        f"Issue: {f.get('clause_title')}\nProblematic Text: {f.get('clause_text')}\nRequested Change: {f.get('negotiation_tip')}" 
+        for f in red_flags
+    ])
+    
     prompt = NEGOTIATION_EMAIL_PROMPT.format(
         flags_text=flags_summary,
         company_name=company_name or "Hiring Manager",
         user_name=user_name or "[Your Name]"
     )
     
-    return gemma_client.generate_content(model=settings.dense_model, contents=prompt, temperature=0.4).strip()
+    system_prompt = "You are an elite legal negotiator drafting professional pushback emails."
+    return gemma_client.generate_content(
+        model=settings.dense_model, 
+        contents=prompt, 
+        system_instruction=system_prompt, 
+        temperature=0.4
+    ).strip()
 
 def generate_tldr_summary(
     contract_type: str,
@@ -380,14 +391,15 @@ async def analyze_contract_stream(
             try:
                 (risk_score, compatibility_score, verdict, verdict_reason, red_flags, safe_clauses, req_breakdown) = run_moe_analysis(working_text, contract_type, requirements)
             except Exception as exc:
-                # Trigger Fallback if API fails
                 (risk_score, compatibility_score, verdict, verdict_reason, red_flags, safe_clauses, req_breakdown) = build_fallback_analysis(working_text, requirements)
 
             yield sse_event("risk_score", {"risk_score": risk_score})
             yield sse_event("compatibility_score", {"compatibility_score": compatibility_score})
             yield sse_event("verdict", {"verdict": verdict, "verdict_reason": verdict_reason})
 
+            # FIX: Adding a breather for rate limit and injecting the specific error to the UI
             try:
+                time.sleep(1) # Prevent 429 Resource Exhausted
                 summary_text = generate_tldr_summary(
                     contract_type,
                     risk_score,
@@ -396,8 +408,8 @@ async def analyze_contract_stream(
                     safe_clauses,
                     requirements,
                 )
-            except Exception:
-                summary_text = "Summary unavailable due to an upstream error."
+            except Exception as exc:
+                summary_text = f"Summary unavailable: {str(exc)}"
             yield sse_event("summary", {"summary": summary_text})
             
             for req in req_breakdown:
@@ -413,6 +425,7 @@ async def analyze_contract_stream(
                 
                 explanation = flag.get("plain_english_explanation", "")
                 try:
+                    time.sleep(0.5) # Prevent 429 Resource Exhausted
                     explanation = explain_red_flag(contract_type, flag)
                 except Exception:
                     pass
@@ -435,6 +448,7 @@ async def analyze_contract_stream(
             yield sse_event("status", {"stage": "email", "message": "Drafting negotiation email... (Gemma Dense)"})
             email_text = ""
             try:
+                time.sleep(1) # Prevent 429 Resource Exhausted
                 email_text = generate_negotiation_email(red_flags, company_name or "", user_name or "")
             except Exception:
                 email_text = "Dear Hiring Manager,\n\nPlease review the clauses regarding bonds and overtime as we discussed.\n\nBest,\n[Your Name]"
