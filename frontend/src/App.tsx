@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Upload, FileText, AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, CheckCircle2, XCircle, Copy, Download, Loader2, Building, User } from 'lucide-react';
 
 const CONTRACT_TYPES = [
@@ -17,12 +17,15 @@ type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 type RequirementMatch = { requirement: string; met: boolean; explanation: string; };
 type FlaggedClause = { clause_title: string; clause_text: string; plain_english_explanation: string; negotiation_tip: string; severity: Severity; };
 type SafeClause = { clause_title: string; plain_english_explanation: string; };
+type ChatMessage = { role: 'user' | 'assistant'; content: string; };
+type ClauseChatState = { messages: ChatMessage[]; input: string; isLoading: boolean; error?: string | null; };
 
 type AnalyzeResult = {
   risk_score: number | null;
   compatibility_score: number | null;
   verdict: Verdict | null;
   verdict_reason: string | null;
+  summary: string | null;
   requirement_breakdown: RequirementMatch[];
   red_flags: FlaggedClause[];
   safe_clauses: SafeClause[];
@@ -58,13 +61,12 @@ const VERDICT_META = {
   REJECT: { label: 'REJECT', description: 'High risk or poor compatibility.', tone: 'red' as const },
 };
 
-const STAGE_PROGRESS: Record<string, number> = {
-  'extract': 15,
-  'classify': 45,
-  'explain': 75,
-  'email': 90,
-  'done': 100
-};
+const ANALYSIS_STEPS = [
+  { key: 'extract', label: 'Extract' },
+  { key: 'analyze', label: 'Analyze' },
+  { key: 'explain', label: 'Explain' },
+  { key: 'email', label: 'Email' },
+];
 
 function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -87,11 +89,41 @@ function App() {
   const [streamStatus, setStreamStatus] = useState<{ stage: string, message: string } | null>(null);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [isLoadingReport, setIsLoadingReport] = useState(false);
+  const [clauseChats, setClauseChats] = useState<Record<number, ClauseChatState>>({});
   
   const [expandedFlags, setExpandedFlags] = useState<number[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const reportId = params.get('report');
+    if (!reportId) return;
+
+    setIsLoadingReport(true);
+    setError(null);
+
+    fetch(`${API_BASE_URL}/report/${reportId}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `Request failed (${res.status})`);
+        }
+        return res.json() as Promise<{ contract_type: string; analysis: AnalyzeResult }>;
+      })
+      .then((payload) => {
+        setContractType(payload.contract_type || CONTRACT_TYPES[0].id);
+        setResult(payload.analysis);
+        setShareUrl(window.location.href);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to load shared report.');
+      })
+      .finally(() => setIsLoadingReport(false));
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
@@ -105,6 +137,55 @@ function App() {
 
   const toggleFlag = (index: number) => {
     setExpandedFlags(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]);
+  };
+
+  const updateClauseChat = (index: number, next: Partial<ClauseChatState>) => {
+    setClauseChats(prev => {
+      const current = prev[index] || { messages: [], input: '', isLoading: false, error: null };
+      return { ...prev, [index]: { ...current, ...next } };
+    });
+  };
+
+  const handleAskClause = async (index: number) => {
+    if (!result) return;
+    const chat = clauseChats[index] || { messages: [], input: '', isLoading: false, error: null };
+    const question = chat.input.trim();
+    if (!question) return;
+
+    const flag = result.red_flags[index];
+    const nextMessages = [...chat.messages, { role: 'user', content: question } as ChatMessage];
+    updateClauseChat(index, { messages: nextMessages, input: '', isLoading: true, error: null });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/ask-clause`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_type: contractType,
+          clause_title: flag.clause_title,
+          clause_text: flag.clause_text,
+          question,
+          history: chat.messages,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Request failed (${response.status})`);
+      }
+
+      const payload = await response.json() as { answer?: string };
+      const answer = payload.answer || 'No response available.';
+      updateClauseChat(index, {
+        messages: [...nextMessages, { role: 'assistant', content: answer }],
+        isLoading: false,
+      });
+    } catch (err) {
+      updateClauseChat(index, {
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Failed to get a response.',
+      });
+    }
   };
 
   const handleDownloadPDF = async () => {
@@ -278,10 +359,11 @@ function App() {
 
     setIsAnalyzing(true);
     setError(null);
-    setStreamStatus({ stage: 'extract', message: 'Initializing pipeline...' });
+    setStreamStatus({ stage: 'extract', message: 'Extracting contract text... (Gemma E4B)' });
     setExpandedFlags([]);
     setResult({
       risk_score: null, compatibility_score: null, verdict: null, verdict_reason: null,
+      summary: null,
       requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null
     });
 
@@ -354,12 +436,17 @@ function App() {
                   next.verdict = payload.verdict;
                   next.verdict_reason = payload.verdict_reason;
                 }
+                if (eventType === 'summary') next.summary = payload.summary;
                 if (eventType === 'requirement_match') next.requirement_breakdown = [...next.requirement_breakdown, payload];
                 if (eventType === 'safe_clause') next.safe_clauses = [...next.safe_clauses, payload];
                 if (eventType === 'red_flag') next.red_flags = [...next.red_flags, payload];
                 if (eventType === 'negotiation_email') next.negotiation_email = payload.email;
                 return next;
               });
+            }
+            if (eventType === 'share_report') {
+              const base = `${window.location.origin}${window.location.pathname}`;
+              setShareUrl(`${base}?report=${payload.report_id}`);
             }
           }
         }
@@ -375,7 +462,11 @@ function App() {
   const riskMeta = getRiskMeta(result?.risk_score ?? null);
   const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
   const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
-  const currentProgress = streamStatus ? STAGE_PROGRESS[streamStatus.stage] || 0 : (isAnalyzing ? 10 : 0);
+  const activeStepIndex = streamStatus
+    ? (streamStatus.stage === 'done'
+        ? ANALYSIS_STEPS.length
+        : ANALYSIS_STEPS.findIndex(step => step.key === streamStatus.stage))
+    : -1;
   const exportTimestamp = new Date().toISOString().replace('T', ' ').replace('Z', ' UTC');
 
   return (
@@ -393,6 +484,11 @@ function App() {
       <main className="max-w-4xl mx-auto px-4 py-8 space-y-8">
         {!result ? (
           <div className="space-y-6 max-w-2xl mx-auto">
+            {isLoadingReport ? (
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-5 text-sm text-slate-600">
+                Loading shared report...
+              </div>
+            ) : null}
             <div className="text-center space-y-2 mb-8">
               <h2 className="text-3xl font-extrabold text-slate-900">Analyze your contract in seconds</h2>
               <p className="text-slate-500">Upload a photo or PDF to instantly identify hidden traps.</p>
@@ -508,18 +604,45 @@ function App() {
               {isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract'}
             </button>
 
-            {/* Streaming Progress Bar */}
+            {/* Streaming Progress Stepper */}
             {(isAnalyzing || streamStatus?.stage === 'done') && (
-              <div className="w-full space-y-2 mt-4 animate-fade-in">
-                <div className="flex justify-between text-xs font-bold text-slate-500 uppercase">
-                  <span>Progress</span>
-                  <span className="text-blue-600">{streamStatus?.message || 'Processing...'}</span>
+              <div className="w-full space-y-3 mt-4 animate-fade-in">
+                <div className="flex items-center gap-2">
+                  {ANALYSIS_STEPS.map((step, index) => {
+                    const isDone = activeStepIndex > index;
+                    const isActive = activeStepIndex === index;
+                    return (
+                      <div key={step.key} className="flex items-center gap-2 flex-1">
+                        <div
+                          className={`h-3 w-3 rounded-full transition ${
+                            isDone
+                              ? 'bg-emerald-500'
+                              : isActive
+                                ? 'bg-blue-500 animate-pulse'
+                                : 'bg-slate-300'
+                          }`}
+                        />
+                        <span
+                          className={`text-xs font-semibold uppercase tracking-wider ${
+                            isDone || isActive ? 'text-slate-700' : 'text-slate-400'
+                          }`}
+                        >
+                          {step.label}
+                        </span>
+                        {index < ANALYSIS_STEPS.length - 1 && (
+                          <div
+                            className={`h-px flex-1 ${
+                              isDone ? 'bg-emerald-400' : 'bg-slate-200'
+                            }`}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-blue-500 transition-all duration-500 ease-out" 
-                    style={{ width: `${currentProgress}%` }}
-                  />
+                <div className="text-xs text-slate-500 flex items-center gap-2">
+                  <span className="inline-flex h-2 w-2 rounded-full bg-blue-500" />
+                  {streamStatus?.message || 'Processing...'}
                 </div>
               </div>
             )}
@@ -557,6 +680,11 @@ function App() {
                   <div className="pdf-note">{result.verdict_reason || 'Verdict pending.'}</div>
                 </div>
               </div>
+              {result.summary ? (
+                <div className="pdf-note" style={{ marginTop: '10px' }}>
+                  <strong>TL;DR:</strong> {result.summary}
+                </div>
+              ) : null}
             </div>
 
             <div className="flex items-center justify-between border-b pb-4 screen-only" data-export-ignore="true">
@@ -589,6 +717,37 @@ function App() {
                 {error}
               </div>
             )}
+
+            {shareUrl ? (
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm screen-only">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Shareable Report Link</div>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    type="text"
+                    readOnly
+                    value={shareUrl}
+                    className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(shareUrl)}
+                    className="text-xs font-semibold bg-slate-900 text-white px-3 py-2 rounded-md"
+                  >
+                    Copy Link
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">TL;DR Summary</h3>
+                <span className="text-[11px] font-semibold text-slate-400">3-sentence brief</span>
+              </div>
+              <p className="mt-3 text-sm text-slate-700 leading-relaxed">
+                {result.summary || (isAnalyzing ? 'Generating summary...' : 'Summary not available.')}
+              </p>
+            </div>
 
             <div className="grid gap-4 md:grid-cols-3 screen-only">
               {/* Risk Score */}
@@ -695,6 +854,60 @@ function App() {
                             <div className="text-amber-800 text-sm">
                               <span className="font-bold uppercase text-xs tracking-wider block mb-1">💡 How to Negotiate</span>
                               {flag.negotiation_tip}
+                            </div>
+                          </div>
+
+                          <div className="border border-slate-200 rounded-lg p-4 bg-slate-50">
+                            <div className="flex items-center justify-between mb-3">
+                              <h5 className="text-xs font-bold uppercase tracking-wider text-slate-600">Ask about this clause</h5>
+                              <span className="text-[10px] text-slate-400">Gemma Q&A</span>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                              {(clauseChats[i]?.messages || []).length === 0 ? (
+                                <p className="text-xs text-slate-500">Ask a follow-up question about this clause.</p>
+                              ) : (
+                                (clauseChats[i]?.messages || []).map((msg, idx) => (
+                                  <div
+                                    key={`chat-${i}-${idx}`}
+                                    className={`rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                                      msg.role === 'user'
+                                        ? 'bg-white border border-slate-200 text-slate-700'
+                                        : 'bg-blue-50 border border-blue-100 text-slate-700'
+                                    }`}
+                                  >
+                                    <span className="font-semibold mr-2">
+                                      {msg.role === 'user' ? 'You' : 'Gemma'}:
+                                    </span>
+                                    {msg.content}
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                            {clauseChats[i]?.error ? (
+                              <div className="mt-2 text-xs text-red-600">{clauseChats[i]?.error}</div>
+                            ) : null}
+                            <div className="mt-3 flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={clauseChats[i]?.input || ''}
+                                onChange={(e) => updateClauseChat(i, { input: e.target.value })}
+                                placeholder="Ask a follow-up question..."
+                                className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-blue-500"
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleAskClause(i);
+                                  }
+                                }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleAskClause(i)}
+                                disabled={clauseChats[i]?.isLoading}
+                                className="text-xs font-semibold bg-slate-900 text-white px-3 py-2 rounded-md disabled:opacity-50"
+                              >
+                                {clauseChats[i]?.isLoading ? 'Asking…' : 'Ask'}
+                              </button>
                             </div>
                           </div>
                         </div>

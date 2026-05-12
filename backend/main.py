@@ -3,12 +3,15 @@ import binascii
 import json
 import os
 import re
+import uuid
+from collections import OrderedDict
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, List, Optional, Literal
 
 from config import settings
 from gemma_client import GemmaClient, GemmaClientError
@@ -20,6 +23,8 @@ from prompts import (
     SUMMARY_CHUNK_PROMPT,
     SUMMARY_COMBINE_PROMPT,
     NEGOTIATION_EMAIL_PROMPT,
+    TLDR_SUMMARY_PROMPT,
+    CLAUSE_QA_PROMPT,
     get_contract_prompt,
 )
 from utils import extract_json_object, clamp_text, chunk_text
@@ -35,6 +40,33 @@ SUPPORTED_MIME_TYPES = {
 }
 
 CONTRACT_LABELS = CONTRACT_TYPE_LABELS
+
+REPORT_TTL_SECONDS = 60 * 60 * 24 * 7
+REPORT_MAX_ITEMS = 200
+REPORT_STORE: "OrderedDict[str, dict]" = OrderedDict()
+
+def store_report(report: dict) -> str:
+    report_id = uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc)
+    payload = {
+        "report_id": report_id,
+        "created_at": created_at.isoformat(),
+        **report,
+    }
+    REPORT_STORE[report_id] = {
+        "created_at": created_at.timestamp(),
+        "payload": payload,
+    }
+    _prune_reports()
+    return report_id
+
+def _prune_reports() -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    expired = [key for key, value in REPORT_STORE.items() if now - value["created_at"] > REPORT_TTL_SECONDS]
+    for key in expired:
+        REPORT_STORE.pop(key, None)
+    while len(REPORT_STORE) > REPORT_MAX_ITEMS:
+        REPORT_STORE.popitem(last=False)
 
 gemma_client = GemmaClient(api_key=settings.api_key)
 
@@ -219,6 +251,32 @@ def generate_negotiation_email(red_flags: list[dict], company_name: str, user_na
     
     return gemma_client.generate_content(model=settings.dense_model, contents=prompt, temperature=0.4).strip()
 
+def generate_tldr_summary(
+    contract_type: str,
+    risk_score: int,
+    verdict: str,
+    red_flags: list[dict],
+    safe_clauses: list[dict],
+    requirements: str | None,
+) -> str:
+    label = CONTRACT_LABELS.get(contract_type, contract_type)
+    red_flag_titles = ", ".join([f.get("clause_title", "") for f in red_flags[:2] if f.get("clause_title")])
+    safe_titles = ", ".join([s.get("clause_title", "") for s in safe_clauses[:2] if s.get("clause_title")])
+    prompt = TLDR_SUMMARY_PROMPT.format(
+        contract_label=label,
+        risk_score=risk_score,
+        verdict=verdict,
+        red_flags=red_flag_titles or "None identified",
+        safe_clauses=safe_titles or "None identified",
+        requirements=(requirements or "None provided").strip(),
+    )
+
+    return gemma_client.generate_content(
+        model=settings.dense_model,
+        contents=prompt,
+        temperature=0.3,
+    ).strip()
+
 def sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
@@ -245,10 +303,25 @@ class AnalyzeResponse(BaseModel):
     compatibility_score: int
     verdict: str
     verdict_reason: str
+    summary: Optional[str] = None
     requirement_breakdown: List[RequirementMatch]
     red_flags: List[FlaggedClause]
     safe_clauses: List[SafeClause]
     negotiation_email: Optional[str] = None
+
+class ClauseChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+class AskClauseRequest(BaseModel):
+    contract_type: str
+    clause_title: str
+    clause_text: str
+    question: str
+    history: List[ClauseChatMessage] = []
+
+class AskClauseResponse(BaseModel):
+    answer: str
 
 # A robust, keyword-based fallback if the Gemma API crashes during the demo
 def build_fallback_analysis(text: str, requirements: str | None = None) -> tuple:
@@ -300,8 +373,9 @@ async def analyze_contract_stream(
 
     def event_stream() -> Iterator[str]:
         try:
+            yield sse_event("status", {"stage": "extract", "message": "Text extracted. Starting analysis..."})
             working_text = maybe_summarize_contract_text(contract_text)
-            yield sse_event("status", {"stage": "classify", "message": "Scoring risk and parsing user requirements... (Gemma MoE)"})
+            yield sse_event("status", {"stage": "analyze", "message": "Scoring risk and parsing user requirements... (Gemma MoE)"})
 
             try:
                 (risk_score, compatibility_score, verdict, verdict_reason, red_flags, safe_clauses, req_breakdown) = run_moe_analysis(working_text, contract_type, requirements)
@@ -312,6 +386,19 @@ async def analyze_contract_stream(
             yield sse_event("risk_score", {"risk_score": risk_score})
             yield sse_event("compatibility_score", {"compatibility_score": compatibility_score})
             yield sse_event("verdict", {"verdict": verdict, "verdict_reason": verdict_reason})
+
+            try:
+                summary_text = generate_tldr_summary(
+                    contract_type,
+                    risk_score,
+                    verdict,
+                    red_flags,
+                    safe_clauses,
+                    requirements,
+                )
+            except Exception:
+                summary_text = "Summary unavailable due to an upstream error."
+            yield sse_event("summary", {"summary": summary_text})
             
             for req in req_breakdown:
                 yield sse_event("requirement_match", req)
@@ -320,6 +407,7 @@ async def analyze_contract_stream(
                 yield sse_event("safe_clause", clause)
 
             total_flags = len(red_flags)
+            final_flags: list[dict] = []
             for index, flag in enumerate(red_flags, start=1):
                 yield sse_event("status", {"stage": "explain", "message": f"Drafting plain English for clause {index}/{total_flags}... (Gemma Dense)"})
                 
@@ -336,6 +424,13 @@ async def analyze_contract_stream(
                     "negotiation_tip": flag.get("negotiation_tip"),
                     "severity": flag.get("severity"),
                 })
+                final_flags.append({
+                    "clause_title": flag.get("clause_title"),
+                    "clause_text": flag.get("clause_text"),
+                    "plain_english_explanation": explanation,
+                    "negotiation_tip": flag.get("negotiation_tip"),
+                    "severity": flag.get("severity"),
+                })
 
             yield sse_event("status", {"stage": "email", "message": "Drafting negotiation email... (Gemma Dense)"})
             email_text = ""
@@ -346,11 +441,68 @@ async def analyze_contract_stream(
                 
             yield sse_event("negotiation_email", {"email": email_text})
 
+            report_id = store_report({
+                "contract_type": contract_type,
+                "analysis": {
+                    "risk_score": risk_score,
+                    "compatibility_score": compatibility_score,
+                    "verdict": verdict,
+                    "verdict_reason": verdict_reason,
+                    "summary": summary_text,
+                    "requirement_breakdown": req_breakdown,
+                    "red_flags": final_flags or red_flags,
+                    "safe_clauses": safe_clauses,
+                    "negotiation_email": email_text,
+                },
+            })
+            yield sse_event("share_report", {"report_id": report_id})
+
             yield sse_event("done", {"ok": True})
         except Exception as exc:
             yield sse_event("error", {"detail": str(exc)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
+
+@app.get("/report/{report_id}")
+def get_report(report_id: str):
+    _prune_reports()
+    record = REPORT_STORE.get(report_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Report not found or expired")
+    return record["payload"]
+
+@app.post("/ask-clause", response_model=AskClauseResponse)
+def ask_clause(payload: AskClauseRequest):
+    if not settings.api_key:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Missing API Key")
+
+    if payload.contract_type not in CONTRACT_TYPE_LABELS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported contract type")
+
+    history_turns = payload.history[-6:] if payload.history else []
+    history_text = "\n".join(
+        [
+            f"User: {turn.content}" if turn.role == "user" else f"Assistant: {turn.content}"
+            for turn in history_turns
+        ]
+    ) or "None"
+
+    clause_text = payload.clause_text or payload.clause_title
+    prompt = CLAUSE_QA_PROMPT.format(
+        contract_label=CONTRACT_LABELS.get(payload.contract_type, payload.contract_type),
+        clause_title=payload.clause_title,
+        clause_text=clause_text,
+        history=history_text,
+        question=payload.question.strip(),
+    )
+
+    answer = gemma_client.generate_content(
+        model=settings.dense_model,
+        contents=prompt,
+        temperature=0.2,
+    ).strip()
+
+    return AskClauseResponse(answer=answer)
 
 if __name__ == "__main__":
     import uvicorn

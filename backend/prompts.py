@@ -101,3 +101,31 @@ Sign off the email with "{user_name}" (or "[Your Name]" if no name is provided).
 Red Flags to address:
 {flags_text}
 """.strip()
+
+TLDR_SUMMARY_PROMPT = """
+Write a TL;DR summary in exactly 3 sentences. Use plain English and avoid legal jargon.
+Sentence 1: Overall risk and verdict.
+Sentence 2: 1-2 key red flags.
+Sentence 3: Any notable safe clauses or what the user should do next.
+
+Contract type: {contract_label}
+Risk score: {risk_score}
+Verdict: {verdict}
+Top red flags: {red_flags}
+Safe clauses: {safe_clauses}
+User requirements: {requirements}
+""".strip()
+
+CLAUSE_QA_PROMPT = """
+You are a legal expert helping a non-lawyer understand a specific contract clause.
+Respond in plain English with 2-4 sentences. Be concise and practical.
+
+Contract type: {contract_label}
+Clause title: {clause_title}
+Clause text: {clause_text}
+
+Conversation so far:
+{history}
+
+User question: {question}
+""".strip()
