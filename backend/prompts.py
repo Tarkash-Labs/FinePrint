@@ -46,6 +46,7 @@ Verdict guidance:
 
 CONTRACT_TYPE_LABELS = {
   "employment": "Employment Bond",
+  "internship": "Internship Agreement",
   "rental": "Rental Lease",
   "freelance": "Freelance NDA",
   "vc": "VC Term Sheet",
@@ -55,6 +56,7 @@ CONTRACT_TYPE_LABELS = {
 
 CONTRACT_FOCUS_AREAS = {
   "employment": "bonds, notice periods, training costs, repayment clauses, penalties, non-competes, IP assignment, and exit restrictions",
+  "internship": "unpaid work mandates, intellectual property assignment for side projects, conversion clauses, post-internship bonds, unreasonable working hours, and non-competes",
   "rental": "eviction clauses, deposits, repair obligations, late fees, landlord access, unilateral changes, and auto-renewals",
   "freelance": "IP ownership, confidentiality scope, non-solicitation, exclusivity, liability limits, indemnity, and termination",
   "vc": "liquidation preference, anti-dilution, control rights, board seats, vesting, drag-along, and option pool clauses",
@@ -92,7 +94,9 @@ Preserve key clauses and details. Do not analyze or use bullet points.
 NEGOTIATION_EMAIL_PROMPT = """
 You are a professional negotiator. Based on the following contract red flags, write a polite, professional, and firm email to the counterparty requesting changes to the contract.
 Do not be overly aggressive, but stand your ground. 
-Format it with clear spacing. Do not include a subject line, just start with "Dear [Name/Hiring Manager],"
+Format it with clear spacing. Do not include a subject line.
+Start with "Dear {company_name}," (or "Dear Hiring Manager," if no company name is provided).
+Sign off the email with "{user_name}" (or "[Your Name]" if no name is provided).
 
 Red Flags to address:
 {flags_text}

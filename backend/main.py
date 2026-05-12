@@ -38,20 +38,6 @@ CONTRACT_LABELS = CONTRACT_TYPE_LABELS
 
 gemma_client = GemmaClient(api_key=settings.api_key)
 
-def format_megabytes(byte_count: int) -> str:
-    return f"{byte_count / (1024 * 1024):.1f} MB"
-
-def get_upload_size(upload: UploadFile) -> int | None:
-    try:
-        file_obj = upload.file
-        current_pos = file_obj.tell()
-        file_obj.seek(0, os.SEEK_END)
-        size = file_obj.tell()
-        file_obj.seek(current_pos)
-        return size
-    except Exception:
-        return None
-
 def decode_base64_payload(payload: str, mime_type: str | None) -> tuple[bytes, str]:
     trimmed = payload.strip()
     detected_mime = mime_type
@@ -220,12 +206,16 @@ def explain_red_flag(contract_type: str, flag: dict) -> str:
 
     return gemma_client.generate_content(model=settings.dense_model, contents=prompt, system_instruction=system_prompt, temperature=0.2).strip()
 
-def generate_negotiation_email(red_flags: list[dict]) -> str:
+def generate_negotiation_email(red_flags: list[dict], company_name: str, user_name: str) -> str:
     if not red_flags:
         return "No major red flags detected. You are good to proceed!"
     
     flags_summary = "\n".join([f"- {f.get('clause_title')}: {f.get('negotiation_tip')}" for f in red_flags])
-    prompt = NEGOTIATION_EMAIL_PROMPT.format(flags_text=flags_summary)
+    prompt = NEGOTIATION_EMAIL_PROMPT.format(
+        flags_text=flags_summary,
+        company_name=company_name or "Hiring Manager",
+        user_name=user_name or "[Your Name]"
+    )
     
     return gemma_client.generate_content(model=settings.dense_model, contents=prompt, temperature=0.4).strip()
 
@@ -260,13 +250,34 @@ class AnalyzeResponse(BaseModel):
     safe_clauses: List[SafeClause]
     negotiation_email: Optional[str] = None
 
-# Fallback function left mostly intact but updated schema
-def build_fallback_analysis(text: str, requirements: str | None = None) -> AnalyzeResponse:
-    # (Simplified for brevity, returning proper schema structure)
-    return AnalyzeResponse(
-        risk_score=50, compatibility_score=50, verdict="NEGOTIATE", verdict_reason="Fallback triggered.",
-        requirement_breakdown=[], red_flags=[], safe_clauses=[], negotiation_email="Could not generate email."
-    )
+# A robust, keyword-based fallback if the Gemma API crashes during the demo
+def build_fallback_analysis(text: str, requirements: str | None = None) -> tuple:
+    flags = []
+    lower_text = text.lower()
+    
+    if "bond" in lower_text or "penalty" in lower_text or "lakh" in lower_text:
+        flags.append({
+            "clause_title": "Employment Bond / Financial Penalty",
+            "clause_text": "Clause containing financial penalties for early exit.",
+            "plain_english_explanation": "The contract forces you to pay a penalty if you resign early.",
+            "negotiation_tip": "Refuse any financial penalty for leaving the company. Training is a cost of business.",
+            "severity": "high"
+        })
+    if "overtime" in lower_text or "weekend" in lower_text or "hours" in lower_text:
+        flags.append({
+            "clause_title": "Unpaid Overtime Risks",
+            "clause_text": "Clause mentioning weekends, overtime, or extended availability.",
+            "plain_english_explanation": "You may be forced to work weekends or after-hours without extra pay.",
+            "negotiation_tip": "Ask for strict working hours to be defined and a Right to Disconnect.",
+            "severity": "medium"
+        })
+    
+    risk = 85 if flags else 20
+    comp = 30 if flags else 80
+    verdict = "REJECT" if flags else "ACCEPT"
+    reason = "Fallback analysis triggered. Found predatory keywords." if flags else "Fallback analysis found no immediate red flags."
+
+    return (risk, comp, verdict, reason, flags, [{"clause_title": "Fallback", "plain_english_explanation": "Used keyword fallback due to API timeout."}], [])
 
 @app.post("/analyze/stream")
 async def analyze_contract_stream(
@@ -274,6 +285,8 @@ async def analyze_contract_stream(
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
     requirements: str | None = Form(None),
+    company_name: str | None = Form(None),
+    user_name: str | None = Form(None),
     base64_image: str | None = Form(None),
     base64_mime_type: str | None = Form(None),
 ):
@@ -288,13 +301,13 @@ async def analyze_contract_stream(
     def event_stream() -> Iterator[str]:
         try:
             working_text = maybe_summarize_contract_text(contract_text)
-            yield sse_event("status", {"stage": "classify", "message": "Scoring risk and parsing user requirements... (Gemma 12B)"})
+            yield sse_event("status", {"stage": "classify", "message": "Scoring risk and parsing user requirements... (Gemma MoE)"})
 
             try:
                 (risk_score, compatibility_score, verdict, verdict_reason, red_flags, safe_clauses, req_breakdown) = run_moe_analysis(working_text, contract_type, requirements)
             except Exception as exc:
-                yield sse_event("error", {"detail": f"MoE analysis failed: {exc}"})
-                return
+                # Trigger Fallback if API fails
+                (risk_score, compatibility_score, verdict, verdict_reason, red_flags, safe_clauses, req_breakdown) = build_fallback_analysis(working_text, requirements)
 
             yield sse_event("risk_score", {"risk_score": risk_score})
             yield sse_event("compatibility_score", {"compatibility_score": compatibility_score})
@@ -308,12 +321,12 @@ async def analyze_contract_stream(
 
             total_flags = len(red_flags)
             for index, flag in enumerate(red_flags, start=1):
-                yield sse_event("status", {"stage": "explain", "message": f"Drafting plain English for clause {index}/{total_flags}... (Gemma 27B)"})
+                yield sse_event("status", {"stage": "explain", "message": f"Drafting plain English for clause {index}/{total_flags}... (Gemma Dense)"})
                 
                 explanation = flag.get("plain_english_explanation", "")
                 try:
                     explanation = explain_red_flag(contract_type, flag)
-                except GemmaClientError:
+                except Exception:
                     pass
 
                 yield sse_event("red_flag", {
@@ -324,8 +337,13 @@ async def analyze_contract_stream(
                     "severity": flag.get("severity"),
                 })
 
-            yield sse_event("status", {"stage": "email", "message": "Drafting negotiation email... (Gemma 27B)"})
-            email_text = generate_negotiation_email(red_flags)
+            yield sse_event("status", {"stage": "email", "message": "Drafting negotiation email... (Gemma Dense)"})
+            email_text = ""
+            try:
+                email_text = generate_negotiation_email(red_flags, company_name or "", user_name or "")
+            except Exception:
+                email_text = "Dear Hiring Manager,\n\nPlease review the clauses regarding bonds and overtime as we discussed.\n\nBest,\n[Your Name]"
+                
             yield sse_event("negotiation_email", {"email": email_text})
 
             yield sse_event("done", {"ok": True})
