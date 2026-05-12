@@ -112,15 +112,41 @@ function App() {
     setError(null);
     setIsExporting(true);
     try {
+      const exportRoot = reportRef.current;
+      const exportWidth = exportRoot.scrollWidth || exportRoot.offsetWidth;
+      const exportHeight = exportRoot.scrollHeight || exportRoot.offsetHeight;
       const module = await import('html2pdf.js');
       const html2pdf = (module as { default?: unknown }).default ?? module;
       if (typeof html2pdf !== 'function') throw new Error('PDF export is unavailable.');
 
       const exportStyles = `
+        .pdf-export .pdf-only { display: block !important; }
+        .pdf-export .screen-only { display: none !important; }
+        .pdf-export [data-export-ignore="true"] { display: none !important; }
+        .pdf-export .export-root { padding-bottom: 32px !important; }
+        .pdf-export .avoid-break { break-inside: avoid !important; page-break-inside: avoid !important; }
+        .pdf-export .pdf-page-break { break-before: page !important; page-break-before: always !important; }
+        .pdf-export .pdf-section-title { font-size: 18px; font-weight: 700; margin: 18px 0 8px; }
+        .pdf-export .pdf-meta-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+        .pdf-export .pdf-card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; background: #ffffff !important; }
+        .pdf-export .pdf-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #64748b; }
+        .pdf-export .pdf-score { font-size: 28px; font-weight: 700; margin-top: 6px; color: #0f172a; }
+        .pdf-export .pdf-note { font-size: 12px; color: #475569; margin-top: 4px; }
+        .pdf-export .pdf-safe-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .pdf-export .pdf-safe-card { border: 1px solid #dcfce7; background: #f0fdf4 !important; border-radius: 10px; padding: 10px; }
+        .pdf-export .pdf-safe-title { font-size: 12px; font-weight: 700; color: #14532d; margin-bottom: 4px; }
+        .pdf-export .pdf-safe-text { font-size: 11px; color: #166534; line-height: 1.5; }
+        .pdf-export .negotiation-block { background: #ffffff !important; border-color: #e2e8f0 !important; }
+        .pdf-export .negotiation-header { break-after: avoid-page; page-break-after: avoid; }
+        .pdf-export .negotiation-body { font-size: 12px; line-height: 1.6; color: #0f172a !important; }
         .pdf-export, .pdf-export * {
           color: #0f172a !important;
           border-color: #e2e8f0 !important;
           box-shadow: none !important;
+          text-shadow: none !important;
+          filter: none !important;
+          background: #ffffff !important;
+          background-image: none !important;
         }
         .pdf-export { background-color: #ffffff !important; }
         .pdf-export * { background-color: transparent !important; }
@@ -152,35 +178,29 @@ function App() {
         .pdf-export .border-green-100 { border-color: #dcfce7 !important; }
       `;
 
-      // oklch → hex fallback map for common Tailwind colors
-      const OKLCH_FALLBACKS: Record<string, string> = {
-        color: '#0f172a',
-        'background-color': '#ffffff',
-        'border-top-color': '#e2e8f0',
-        'border-right-color': '#e2e8f0',
-        'border-bottom-color': '#e2e8f0',
-        'border-left-color': '#e2e8f0',
-        'outline-color': '#e2e8f0',
-        'text-decoration-color': '#0f172a',
-        'caret-color': '#0f172a',
-        'fill': 'none',
-        'stroke': 'none',
-        'box-shadow': 'none',
-      };
-
-      const sanitizeOklch = (doc: Document) => {
+      const sanitizeUnsupportedColors = (doc: Document) => {
         const view = doc.defaultView;
         if (!view) return;
 
         doc.querySelectorAll<HTMLElement>('*').forEach((el) => {
           const styles = view.getComputedStyle(el);
-          Object.keys(OKLCH_FALLBACKS).forEach((prop) => {
+          for (let i = 0; i < styles.length; i += 1) {
+            const prop = styles[i];
             const value = styles.getPropertyValue(prop);
-            // Only override if the computed value contains oklch
-            if (value && value.includes('oklch')) {
-              el.style.setProperty(prop, OKLCH_FALLBACKS[prop], 'important');
-            }
-          });
+            if (!value) continue;
+            if (!value.includes('oklch') && !value.includes('color-mix')) continue;
+
+            let fallback = 'initial';
+            if (prop.includes('background')) fallback = '#ffffff';
+            if (prop.includes('color') || prop.includes('stroke') || prop.includes('fill')) fallback = '#0f172a';
+            if (prop.includes('border')) fallback = '#e2e8f0';
+            if (prop.includes('shadow')) fallback = 'none';
+            if (prop.includes('filter')) fallback = 'none';
+            if (prop.includes('outline')) fallback = '#e2e8f0';
+            if (prop.includes('decoration')) fallback = '#0f172a';
+
+            el.style.setProperty(prop, fallback, 'important');
+          }
         });
       };
 
@@ -188,19 +208,51 @@ function App() {
         margin: 0.5,
         filename: 'FinePrint_Analysis.pdf',
         image: { type: 'jpeg' as const, quality: 0.98 },
+        pagebreak: { mode: ['css', 'legacy'] },
         html2canvas: {
           scale: 2,
           useCORS: true,
+          logging: false,
+          backgroundColor: '#ffffff',
+          scrollX: 0,
+          scrollY: 0,
+          x: 0,
+          y: 0,
+          width: exportWidth,
+          height: exportHeight,
+          windowWidth: exportWidth,
+          windowHeight: exportHeight,
           onclone: (doc: Document) => {
             // 1. Add pdf-export class for our explicit hex overrides
             doc.documentElement.classList.add('pdf-export');
+            // Ensure a neutral background to avoid oklch tokens
+            doc.body.style.backgroundColor = '#ffffff';
+            doc.body.style.margin = '0';
+            doc.body.style.padding = '0';
+            doc.documentElement.style.margin = '0';
+            doc.documentElement.style.padding = '0';
             // 2. Inject explicit hex color overrides FIRST
             const style = doc.createElement('style');
             style.textContent = exportStyles;
             doc.head.appendChild(style);
-            // 3. Walk every element and replace any remaining oklch values
+            const exportRoot = doc.querySelector('[data-export-root="true"]') as HTMLElement | null;
+            if (exportRoot) {
+              exportRoot.style.margin = '0';
+              exportRoot.style.padding = '0';
+              exportRoot.style.maxWidth = 'none';
+              exportRoot.style.width = `${exportWidth}px`;
+              exportRoot.style.transform = 'none';
+              exportRoot.style.left = '0';
+            }
+            // Force background/gradient cleanup on common wrappers
+            doc.querySelectorAll<HTMLElement>('*').forEach((el) => {
+              if (el.style && el.style.backgroundImage) {
+                el.style.backgroundImage = 'none';
+              }
+            });
+            // 3. Walk every element and replace any remaining oklch / color-mix values
             //    Do NOT remove stylesheets — they contain our overrides
-            sanitizeOklch(doc);
+            sanitizeUnsupportedColors(doc);
           }
         },
         jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' as const }
@@ -208,7 +260,7 @@ function App() {
 
       await (html2pdf as (options?: unknown) => { set: (value: unknown) => { from: (node: HTMLElement) => { save: () => Promise<void> } } })()
         .set(opt)
-        .from(reportRef.current)
+        .from(exportRoot)
         .save();
     } catch (err) {
       setError(err instanceof Error ? `PDF export failed: ${err.message}` : 'PDF export failed.');
@@ -324,6 +376,7 @@ function App() {
   const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
   const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
   const currentProgress = streamStatus ? STAGE_PROGRESS[streamStatus.stage] || 0 : (isAnalyzing ? 10 : 0);
+  const exportTimestamp = new Date().toISOString().replace('T', ' ').replace('Z', ' UTC');
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
@@ -474,8 +527,39 @@ function App() {
             {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
           </div>
         ) : (
-          <div className="space-y-8" ref={reportRef}>
-            <div className="flex items-center justify-between border-b pb-4">
+          <div className="space-y-8 export-root" ref={reportRef} data-export-root="true">
+            <div className="hidden pdf-only">
+              <div className="flex items-start justify-between border-b border-slate-200 pb-4">
+                <div>
+                  <h2 className="text-2xl font-bold">FinePrint Analysis Report</h2>
+                  <p className="text-sm text-slate-500">Generated {exportTimestamp}</p>
+                </div>
+                <div className="text-right text-xs text-slate-500">
+                  <div className="font-semibold text-slate-700">Contract Type</div>
+                  <div>{CONTRACT_TYPES.find(c => c.id === contractType)?.label || 'General Contract'}</div>
+                </div>
+              </div>
+              <div className="pdf-section-title">Executive Summary</div>
+              <div className="pdf-meta-grid">
+                <div className="pdf-card">
+                  <div className="pdf-badge">Risk Score</div>
+                  <div className="pdf-score">{result.risk_score !== null ? result.risk_score : '--'}</div>
+                  <div className="pdf-note">{riskMeta.label} • {riskMeta.description}</div>
+                </div>
+                <div className="pdf-card">
+                  <div className="pdf-badge">Compatibility</div>
+                  <div className="pdf-score">{result.compatibility_score !== null ? result.compatibility_score : '--'}</div>
+                  <div className="pdf-note">{compatibilityMeta.label} • {compatibilityMeta.description}</div>
+                </div>
+                <div className="pdf-card">
+                  <div className="pdf-badge">Final Verdict</div>
+                  <div className="pdf-score">{result.verdict ?? '--'}</div>
+                  <div className="pdf-note">{result.verdict_reason || 'Verdict pending.'}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between border-b pb-4 screen-only" data-export-ignore="true">
               <div>
                 <h2 className="text-2xl font-bold flex items-center gap-3">
                   Analysis Results
@@ -490,8 +574,9 @@ function App() {
                 )}
               </div>
               <div className="flex gap-3">
-                <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
-                  <Download className="w-4 h-4" /> Export PDF
+                <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="text-sm font-semibold bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
+                  {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  {isExporting ? 'Exporting…' : 'Export PDF'}
                 </button>
                 <button onClick={() => { setResult(null); setFile(null); setError(null); setContractText(''); }} className="text-sm font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded-lg transition">
                   New Analysis
@@ -505,7 +590,7 @@ function App() {
               </div>
             )}
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-3 screen-only">
               {/* Risk Score */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
                 <div>
@@ -627,8 +712,8 @@ function App() {
 
             {/* Email Generator UI */}
             {(!isAnalyzing || result.negotiation_email) && result.red_flags.length > 0 && (
-              <div className="space-y-4 mt-8 bg-blue-50/50 p-6 rounded-2xl border border-blue-100">
-                 <div className="flex items-center justify-between border-b border-blue-200 pb-2">
+                <div className="space-y-4 mt-8 bg-blue-50/50 p-6 rounded-2xl border border-blue-100 negotiation-block">
+                  <div className="flex items-center justify-between border-b border-blue-200 pb-2 negotiation-header">
                     <h3 className="font-bold flex items-center gap-2 text-blue-900">
                       Draft Negotiation Email
                       <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">Gemma 27B</span>
@@ -637,13 +722,14 @@ function App() {
                       <button 
                         onClick={() => navigator.clipboard.writeText(result.negotiation_email || '')}
                         className="text-sm font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                        data-export-ignore="true"
                       >
                         <Copy className="w-4 h-4" /> Copy Text
                       </button>
                     )}
                  </div>
                  {result.negotiation_email ? (
-                   <div className="bg-white border border-blue-200 rounded-lg p-5 text-sm text-slate-700 whitespace-pre-wrap font-serif leading-relaxed shadow-inner">
+                   <div className="bg-white border border-blue-200 rounded-lg p-5 text-sm text-slate-700 whitespace-pre-wrap font-serif leading-relaxed shadow-inner negotiation-body">
                      {result.negotiation_email}
                    </div>
                  ) : (
@@ -652,14 +738,30 @@ function App() {
               </div>
             )}
 
-            <div className="space-y-4 pt-4">
+            <div className="hidden pdf-only pdf-page-break">
+              <div className="pdf-section-title">Safe Clauses</div>
+              {result.safe_clauses.length > 0 ? (
+                <div className="pdf-safe-grid">
+                  {result.safe_clauses.map((clause, i) => (
+                    <div key={`pdf-safe-${i}`} className="pdf-safe-card">
+                      <div className="pdf-safe-title">{clause.clause_title}</div>
+                      <div className="pdf-safe-text">{clause.plain_english_explanation}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="pdf-note">No safe clauses found for this contract.</div>
+              )}
+            </div>
+
+            <div className="space-y-4 pt-4 pdf-page-break screen-only">
               <h3 className="font-bold flex items-center gap-2 text-slate-800 border-b pb-2">
                 <ShieldCheck className="w-5 h-5 text-green-500" />
                 Safe Clauses ({result.safe_clauses.length})
               </h3>
               <div className="grid gap-4 md:grid-cols-2">
                 {result.safe_clauses.map((clause, i) => (
-                  <div key={i} className="bg-green-50/50 border border-green-100 rounded-xl p-4">
+                  <div key={i} className="bg-green-50/50 border border-green-100 rounded-xl p-4 avoid-break">
                     <h4 className="font-semibold text-green-900 mb-1 text-sm">{clause.clause_title}</h4>
                     <p className="text-green-800/80 text-xs leading-relaxed">{clause.plain_english_explanation}</p>
                   </div>
