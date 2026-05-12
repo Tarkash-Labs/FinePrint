@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react';
-import { Upload, FileText, AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, CheckCircle2, XCircle, Copy, Download, Loader2 } from 'lucide-react';
-import html2pdf from 'html2pdf.js';
+import { Upload, FileText, AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, CheckCircle2, XCircle, Copy, Download, Loader2, Building, User } from 'lucide-react';
 
 const CONTRACT_TYPES = [
   { id: 'employment', label: 'Employment Bond' },
+  { id: 'internship', label: 'Internship Agreement' },
   { id: 'rental', label: 'Rental Lease' },
   { id: 'freelance', label: 'Freelance NDA' },
   { id: 'vc', label: 'VC Term Sheet' },
@@ -14,24 +14,9 @@ const CONTRACT_TYPES = [
 type Severity = 'high' | 'medium' | 'low';
 type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 
-type RequirementMatch = {
-  requirement: string;
-  met: boolean;
-  explanation: string;
-};
-
-type FlaggedClause = {
-  clause_title: string;
-  clause_text: string;
-  plain_english_explanation: string;
-  negotiation_tip: string;
-  severity: Severity;
-};
-
-type SafeClause = {
-  clause_title: string;
-  plain_english_explanation: string;
-};
+type RequirementMatch = { requirement: string; met: boolean; explanation: string; };
+type FlaggedClause = { clause_title: string; clause_text: string; plain_english_explanation: string; negotiation_tip: string; severity: Severity; };
+type SafeClause = { clause_title: string; plain_english_explanation: string; };
 
 type AnalyzeResult = {
   risk_score: number | null;
@@ -73,14 +58,32 @@ const VERDICT_META = {
   REJECT: { label: 'REJECT', description: 'High risk or poor compatibility.', tone: 'red' as const },
 };
 
+const STAGE_PROGRESS: Record<string, number> = {
+  'extract': 15,
+  'classify': 45,
+  'explain': 75,
+  'email': 90,
+  'done': 100
+};
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [inputMode, setInputMode] = useState<'file' | 'text'>('file');
   const [contractText, setContractText] = useState('');
   const [contractType, setContractType] = useState(CONTRACT_TYPES[0].id);
+  
+  // Form State
+  const [role, setRole] = useState('');
+  const [duration, setDuration] = useState('1 Year');
+  const [sideProjects, setSideProjects] = useState(true);
+  const [relocation] = useState(false);
+  const [compensation, setCompensation] = useState('');
   const [requirements, setRequirements] = useState('');
+  const [companyName, setCompanyName] = useState('');
+  const [userName, setUserName] = useState('');
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [streamStatus, setStreamStatus] = useState<{ stage: string, message: string } | null>(null);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,44 +104,151 @@ function App() {
   };
 
   const toggleFlag = (index: number) => {
-    setExpandedFlags(prev => 
-      prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]
-    );
+    setExpandedFlags(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]);
   };
 
-  const handleDownloadPDF = () => {
-    if (!reportRef.current) return;
-    const opt = {
-      margin: 0.5,
-      filename: 'FinePrint_Analysis.pdf',
-      image: { type: 'jpeg' as const, quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
-    };
-    html2pdf().set(opt).from(reportRef.current).save();
+  const handleDownloadPDF = async () => {
+    if (!reportRef.current || isExporting) return;
+    setError(null);
+    setIsExporting(true);
+    try {
+      const module = await import('html2pdf.js');
+      const html2pdf = (module as { default?: unknown }).default ?? module;
+      if (typeof html2pdf !== 'function') throw new Error('PDF export is unavailable.');
+
+      const exportStyles = `
+        .pdf-export, .pdf-export * {
+          color: #0f172a !important;
+          border-color: #e2e8f0 !important;
+          box-shadow: none !important;
+        }
+        .pdf-export { background-color: #ffffff !important; }
+        .pdf-export * { background-color: transparent !important; }
+        .pdf-export .bg-white { background-color: #ffffff !important; }
+        .pdf-export .bg-slate-50 { background-color: #f8fafc !important; }
+        .pdf-export .bg-slate-100 { background-color: #f1f5f9 !important; }
+        .pdf-export .bg-blue-50 { background-color: #eff6ff !important; }
+        .pdf-export .bg-blue-100 { background-color: #dbeafe !important; }
+        .pdf-export .bg-amber-50 { background-color: #fffbeb !important; }
+        .pdf-export .bg-red-50 { background-color: #fef2f2 !important; }
+        .pdf-export .bg-emerald-100 { background-color: #d1fae5 !important; }
+        .pdf-export .text-blue-600 { color: #2563eb !important; }
+        .pdf-export .text-emerald-600 { color: #059669 !important; }
+        .pdf-export .text-amber-600 { color: #d97706 !important; }
+        .pdf-export .text-red-600 { color: #dc2626 !important; }
+        .pdf-export .text-red-700 { color: #b91c1c !important; }
+        .pdf-export .text-green-500 { color: #22c55e !important; }
+        .pdf-export .text-red-500 { color: #ef4444 !important; }
+        .pdf-export .text-slate-400 { color: #94a3b8 !important; }
+        .pdf-export .text-slate-500 { color: #64748b !important; }
+        .pdf-export .text-slate-600 { color: #475569 !important; }
+        .pdf-export .text-slate-700 { color: #334155 !important; }
+        .pdf-export .text-slate-800 { color: #1e293b !important; }
+        .pdf-export .text-slate-900 { color: #0f172a !important; }
+        .pdf-export .border-slate-200 { border-color: #e2e8f0 !important; }
+        .pdf-export .border-red-200 { border-color: #fecaca !important; }
+        .pdf-export .border-blue-100 { border-color: #dbeafe !important; }
+        .pdf-export .border-amber-200 { border-color: #fde68a !important; }
+        .pdf-export .border-green-100 { border-color: #dcfce7 !important; }
+      `;
+
+      // oklch → hex fallback map for common Tailwind colors
+      const OKLCH_FALLBACKS: Record<string, string> = {
+        color: '#0f172a',
+        'background-color': '#ffffff',
+        'border-top-color': '#e2e8f0',
+        'border-right-color': '#e2e8f0',
+        'border-bottom-color': '#e2e8f0',
+        'border-left-color': '#e2e8f0',
+        'outline-color': '#e2e8f0',
+        'text-decoration-color': '#0f172a',
+        'caret-color': '#0f172a',
+        'fill': 'none',
+        'stroke': 'none',
+        'box-shadow': 'none',
+      };
+
+      const sanitizeOklch = (doc: Document) => {
+        const view = doc.defaultView;
+        if (!view) return;
+
+        doc.querySelectorAll<HTMLElement>('*').forEach((el) => {
+          const styles = view.getComputedStyle(el);
+          Object.keys(OKLCH_FALLBACKS).forEach((prop) => {
+            const value = styles.getPropertyValue(prop);
+            // Only override if the computed value contains oklch
+            if (value && value.includes('oklch')) {
+              el.style.setProperty(prop, OKLCH_FALLBACKS[prop], 'important');
+            }
+          });
+        });
+      };
+
+      const opt = {
+        margin: 0.5,
+        filename: 'FinePrint_Analysis.pdf',
+        image: { type: 'jpeg' as const, quality: 0.98 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          onclone: (doc: Document) => {
+            // 1. Add pdf-export class for our explicit hex overrides
+            doc.documentElement.classList.add('pdf-export');
+            // 2. Inject explicit hex color overrides FIRST
+            const style = doc.createElement('style');
+            style.textContent = exportStyles;
+            doc.head.appendChild(style);
+            // 3. Walk every element and replace any remaining oklch values
+            //    Do NOT remove stylesheets — they contain our overrides
+            sanitizeOklch(doc);
+          }
+        },
+        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' as const }
+      };
+
+      await (html2pdf as (options?: unknown) => { set: (value: unknown) => { from: (node: HTMLElement) => { save: () => Promise<void> } } })()
+        .set(opt)
+        .from(reportRef.current)
+        .save();
+    } catch (err) {
+      setError(err instanceof Error ? `PDF export failed: ${err.message}` : 'PDF export failed.');
+    } finally {
+      document.querySelectorAll('.html2pdf__container, .html2pdf__overlay').forEach((node) => node.remove());
+      setIsExporting(false);
+    }
   };
 
   const handleAnalyze = async () => {
     const trimmedText = contractText.trim();
-    const trimmedRequirements = requirements.trim();
 
     if (inputMode === 'file' && !file) return setError('Please upload a file.');
     if (inputMode === 'text' && !trimmedText) return setError('Please paste the contract text.');
 
     setIsAnalyzing(true);
     setError(null);
-    setStreamStatus(null);
+    setStreamStatus({ stage: 'extract', message: 'Initializing pipeline...' });
     setExpandedFlags([]);
     setResult({
       risk_score: null, compatibility_score: null, verdict: null, verdict_reason: null,
       requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null
     });
 
+    const combinedRequirements = `
+      Role: ${role || 'Not specified'}
+      Expected Duration: ${duration}
+      Side Projects Allowed: ${sideProjects ? 'Yes' : 'No'}
+      Open to Relocation: ${relocation ? 'Yes' : 'No'}
+      Minimum Compensation: ${compensation || 'Not specified'}
+      Additional Notes: ${requirements.trim()}
+    `.trim();
+
     const formData = new FormData();
     formData.append('contract_type', contractType);
     if (inputMode === 'file' && file) formData.append('file', file);
     if (inputMode === 'text') formData.append('text', trimmedText);
-    if (trimmedRequirements) formData.append('requirements', trimmedRequirements);
+    formData.append('requirements', combinedRequirements);
+    if (companyName.trim()) formData.append('company_name', companyName.trim());
+    if (userName.trim()) formData.append('user_name', userName.trim());
 
     try {
       const response = await fetch(`${API_BASE_URL}/analyze/stream`, {
@@ -151,21 +261,25 @@ function App() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
-      let partialData = '';
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         
-        partialData += decoder.decode(value, { stream: true });
-        const lines = partialData.split('\n\n');
-        partialData = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf('\n\n');
+        
+        // Robust SSE Parsing logic
+        while (boundary !== -1) {
+          const chunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf('\n\n');
 
-        for (const block of lines) {
-          if (!block.trim()) continue;
+          if (!chunk.trim()) continue;
           
-          const eventMatch = block.match(/event:\s*(.*)/);
-          const dataMatch = block.match(/data:\s*(.*)/);
+          const eventMatch = chunk.match(/event:\s*([^\n]*)/);
+          const dataMatch = chunk.match(/data:\s*(.*)/s); // /s flag for multiline json
           
           if (eventMatch && dataMatch) {
             const eventType = eventMatch[1].trim();
@@ -175,7 +289,8 @@ function App() {
             else if (eventType === 'error') throw new Error(payload.detail);
             else if (eventType === 'done') {
               setIsAnalyzing(false);
-              setStreamStatus(null);
+              setStreamStatus({ stage: 'done', message: 'Analysis Complete' });
+              setTimeout(() => setStreamStatus(null), 2000);
             }
             else {
               setResult(prev => {
@@ -208,6 +323,7 @@ function App() {
   const riskMeta = getRiskMeta(result?.risk_score ?? null);
   const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
   const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
+  const currentProgress = streamStatus ? STAGE_PROGRESS[streamStatus.stage] || 0 : (isAnalyzing ? 10 : 0);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
@@ -278,13 +394,57 @@ function App() {
               </select>
             </div>
 
-            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm">
-              <label className="block text-sm font-semibold text-slate-700 mb-2">Your Requirements</label>
-              <textarea
-                value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={3}
-                placeholder="Example: I plan to stay 2 years, want to keep my side project..."
-                className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              />
+            {/* Structured Hybrid Form */}
+            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm space-y-4">
+              <h3 className="text-sm font-bold text-slate-800 border-b pb-2">Your Guardrails & Requirements</h3>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Target Role</label>
+                  <input type="text" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. SDE, Intern" className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Min. Comp/Stipend</label>
+                  <input type="text" value={compensation} onChange={e => setCompensation(e.target.value)} placeholder="e.g. ₹50k/mo" className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Max Duration / Bond</label>
+                  <select value={duration} onChange={e => setDuration(e.target.value)} className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                    <option>&lt; 6 Months</option>
+                    <option>1 Year</option>
+                    <option>2 Years</option>
+                    <option>No Limit</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between px-2 pt-5">
+                  <label className="text-xs font-semibold text-slate-600">Need Side Projects?</label>
+                  <input type="checkbox" checked={sideProjects} onChange={e => setSideProjects(e.target.checked)} className="w-4 h-4 rounded text-blue-600"/>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Additional Needs (Free Text)</label>
+                <textarea
+                  value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={2}
+                  placeholder="Example: Need flexible hours for exams..."
+                  className="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Email Generator Context */}
+            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm space-y-4">
+              <h3 className="text-sm font-bold text-slate-800 border-b pb-2">Negotiation Details</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="relative">
+                  <Building className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                  <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Company Name" className="w-full pl-9 pr-3 py-2 border rounded-md text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                </div>
+                <div className="relative">
+                  <User className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                  <input type="text" value={userName} onChange={e => setUserName(e.target.value)} placeholder="Your Full Name" className="w-full pl-9 pr-3 py-2 border rounded-md text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                </div>
+              </div>
             </div>
 
             <button 
@@ -292,8 +452,24 @@ function App() {
               disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-lg px-4 py-3 shadow-sm transition-all"
             >
-              Analyze Contract
+              {isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract'}
             </button>
+
+            {/* Streaming Progress Bar */}
+            {(isAnalyzing || streamStatus?.stage === 'done') && (
+              <div className="w-full space-y-2 mt-4 animate-fade-in">
+                <div className="flex justify-between text-xs font-bold text-slate-500 uppercase">
+                  <span>Progress</span>
+                  <span className="text-blue-600">{streamStatus?.message || 'Processing...'}</span>
+                </div>
+                <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-blue-500 transition-all duration-500 ease-out" 
+                    style={{ width: `${currentProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
           </div>
@@ -314,7 +490,7 @@ function App() {
                 )}
               </div>
               <div className="flex gap-3">
-                <button onClick={handleDownloadPDF} disabled={isAnalyzing} className="text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
+                <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
                   <Download className="w-4 h-4" /> Export PDF
                 </button>
                 <button onClick={() => { setResult(null); setFile(null); setError(null); setContractText(''); }} className="text-sm font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded-lg transition">
@@ -344,7 +520,14 @@ function App() {
                     <span className="text-sm text-slate-500">/ 100</span>
                   </div>
                 </div>
-                <p className="mt-4 text-sm text-slate-600">{riskMeta.description}</p>
+                <div>
+                  <p className="mt-4 text-sm text-slate-600">{riskMeta.description}</p>
+                  {result.risk_score !== null && (
+                    <p className="mt-1 text-[11px] text-slate-400 font-medium">
+                      Higher risk than {Math.min(99, Math.max(1, result.risk_score))}% of {CONTRACT_TYPES.find(c => c.id === contractType)?.label.toLowerCase() || 'contracts'}.
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Compatibility Score & Checklist */}
