@@ -15,10 +15,11 @@ type Severity = 'high' | 'medium' | 'low';
 type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 
 type RequirementMatch = { requirement: string; met: boolean; explanation: string; };
-type FlaggedClause = { clause_title: string; clause_text: string; plain_english_explanation: string; negotiation_tip: string; severity: Severity; };
+type FlaggedClause = { clause_title: string; clause_text: string; plain_english_explanation: string; negotiation_tip: string; suggested_rewrite?: string; severity: Severity; };
 type SafeClause = { clause_title: string; plain_english_explanation: string; };
 type ChatMessage = { role: 'user' | 'assistant'; content: string; };
 type ClauseChatState = { messages: ChatMessage[]; input: string; isLoading: boolean; error?: string | null; };
+type Timing = { e4b_ms?: number; moe_ms?: number; dense_ms?: number; };
 
 type AnalyzeResult = {
   risk_score: number | null;
@@ -30,6 +31,7 @@ type AnalyzeResult = {
   red_flags: FlaggedClause[];
   safe_clauses: SafeClause[];
   negotiation_email: string | null;
+  timing?: Timing | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -40,6 +42,28 @@ const SCORE_TONE_STYLES = {
   red: { badge: 'bg-red-100 text-red-700', text: 'text-red-600' },
   gray: { badge: 'bg-slate-100 text-slate-700', text: 'text-slate-400' },
 } as const;
+
+const RISK_BENCHMARKS: Record<string, { min: number; max: number }> = {
+  employment: { min: 40, max: 65 },
+  internship: { min: 35, max: 60 },
+  rental: { min: 30, max: 55 },
+  freelance: { min: 45, max: 70 },
+  vc: { min: 55, max: 80 },
+  tos: { min: 50, max: 75 },
+  general: { min: 40, max: 65 },
+};
+
+const formatMs = (value?: number) => (typeof value === 'number' ? `${(value / 1000).toFixed(1)}s` : '--');
+
+const getBenchmarkNote = (score: number | null, contractId: string) => {
+  if (score === null) return null;
+  const benchmark = RISK_BENCHMARKS[contractId] || RISK_BENCHMARKS.general;
+  const label = CONTRACT_TYPES.find(type => type.id === contractId)?.label || 'contracts';
+  if (score <= benchmark.min) return `Better than most typical ${label.toLowerCase()} contracts.`;
+  if (score >= benchmark.max) return `Worse than 90%+ of typical ${label.toLowerCase()} contracts.`;
+  const percentile = Math.round(((score - benchmark.min) / (benchmark.max - benchmark.min)) * 100);
+  return `Worse than about ${percentile}% of typical ${label.toLowerCase()} contracts.`;
+};
 
 const getRiskMeta = (score: number | null) => {
   if (score === null) return { label: 'Analyzing...', description: 'Waiting for Gemma...', tone: 'gray' as const };
@@ -359,12 +383,12 @@ function App() {
 
     setIsAnalyzing(true);
     setError(null);
-    setStreamStatus({ stage: 'extract', message: 'Extracting contract text... (Gemma E4B)' });
+    setStreamStatus({ stage: 'extract', message: 'Extracting contract text...' });
     setExpandedFlags([]);
     setResult({
       risk_score: null, compatibility_score: null, verdict: null, verdict_reason: null,
       summary: null,
-      requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null
+      requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null, timing: null
     });
 
     const combinedRequirements = `
@@ -422,6 +446,7 @@ function App() {
             if (eventType === 'status') setStreamStatus(payload);
             else if (eventType === 'error') throw new Error(payload.detail);
             else if (eventType === 'done') {
+              setResult(prev => prev ? { ...prev, timing: payload.timing || prev.timing } : prev);
               setIsAnalyzing(false);
               setStreamStatus({ stage: 'done', message: 'Analysis Complete' });
               setTimeout(() => setStreamStatus(null), 2000);
@@ -462,6 +487,7 @@ function App() {
   const riskMeta = getRiskMeta(result?.risk_score ?? null);
   const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
   const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
+  const benchmarkNote = getBenchmarkNote(result?.risk_score ?? null, contractType);
   const activeStepIndex = streamStatus
     ? (streamStatus.stage === 'done'
         ? ANALYSIS_STEPS.length
@@ -700,6 +726,13 @@ function App() {
                     <Loader2 className="w-4 h-4 animate-spin" /> {streamStatus.message}
                   </p>
                 )}
+                {result?.timing && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                    <span className="rounded-full bg-slate-100 px-2 py-1">E4B: {formatMs(result.timing.e4b_ms)}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">MoE: {formatMs(result.timing.moe_ms)}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Dense: {formatMs(result.timing.dense_ms)}</span>
+                  </div>
+                )}
               </div>
               <div className="flex gap-3">
                 <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="text-sm font-semibold bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
@@ -766,9 +799,9 @@ function App() {
                 </div>
                 <div>
                   <p className="mt-4 text-sm text-slate-600">{riskMeta.description}</p>
-                  {result.risk_score !== null && (
+                  {benchmarkNote && (
                     <p className="mt-1 text-[11px] text-slate-400 font-medium">
-                      Higher risk than {Math.min(99, Math.max(1, result.risk_score))}% of {CONTRACT_TYPES.find(c => c.id === contractType)?.label.toLowerCase() || 'contracts'}.
+                      {benchmarkNote}
                     </p>
                   )}
                 </div>
@@ -857,6 +890,23 @@ function App() {
                             </div>
                           </div>
 
+                          {flag.suggested_rewrite && (
+                            <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-lg flex items-start justify-between gap-3">
+                              <div className="text-emerald-800 text-sm">
+                                <span className="font-bold uppercase text-xs tracking-wider block mb-1">Suggested rewrite</span>
+                                {flag.suggested_rewrite}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => navigator.clipboard.writeText(flag.suggested_rewrite || '')}
+                                className="text-xs font-semibold text-emerald-700 hover:text-emerald-900 flex items-center gap-1"
+                                data-export-ignore="true"
+                              >
+                                <Copy className="w-4 h-4" /> Copy
+                              </button>
+                            </div>
+                          )}
+
                           <div className="border border-slate-200 rounded-lg p-4 bg-slate-50">
                             <div className="flex items-center justify-between mb-3">
                               <h5 className="text-xs font-bold uppercase tracking-wider text-slate-600">Ask about this clause</h5>
@@ -929,7 +979,7 @@ function App() {
                   <div className="flex items-center justify-between border-b border-blue-200 pb-2 negotiation-header">
                     <h3 className="font-bold flex items-center gap-2 text-blue-900">
                       Draft Negotiation Email
-                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">Gemma 27B</span>
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">Dense model</span>
                     </h3>
                     {result.negotiation_email && (
                       <button 
