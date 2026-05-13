@@ -1,6 +1,8 @@
 OCR_PROMPT = (
-    "Extract all readable text from this document. "
-    "Return only the raw text, with no commentary."
+  "Extract all readable text from this document. "
+  "If the document has tables, preserve column structure with pipes. "
+  "If it is multi-column, extract the left column first, then the right. "
+  "Return only the extracted text."
 )
 
 def _build_analysis_prompt(contract_label: str, focus_areas: str, requirements: str) -> str:
@@ -22,6 +24,7 @@ Analyze this contract and return a JSON with exactly these fields:
       "clause_text": "<EXACT text from the contract>", 
       "plain_english_explanation": "...", 
       "negotiation_tip": "<Actionable advice on what the user should ask to change>",
+      "suggested_rewrite": "<1-2 sentence fairer replacement clause>",
       "severity": "high|medium|low"
     }}
   ],
@@ -34,6 +37,7 @@ CRITICAL RULES:
 3. You MUST extract the exact original text for "clause_text". 
 4. The "risk_score" is objective based on standard legal risks. Focus heavily on: {focus_areas}.
 5. The "compatibility_score" MUST directly reflect the User Requirements below. If a requirement is completely violated, the compatibility score must drop significantly.
+6. For each red flag, include suggested_rewrite: a fairer version of the clause in 1-2 sentences.
 
 User Requirements to evaluate against:
 {requirements_text}
@@ -128,4 +132,39 @@ Conversation so far:
 {history}
 
 User question: {question}
+""".strip()
+
+FINAL_ENRICHMENT_PROMPT = """
+You are a legal expert helping a non-lawyer understand a contract and negotiate better terms.
+Return ONLY valid JSON with exactly these fields:
+{{
+  "tldr": "<exactly 3 sentences>",
+  "negotiation_email": "<professional email>",
+  "explanations": [
+    {{"index": 1, "plain_english_explanation": "<2-4 sentences>"}}
+  ]
+}}
+
+Rules:
+1. Return ONLY valid JSON. No preamble. No markdown.
+2. If explanation_targets is empty, return an empty explanations array.
+3. Each explanations entry must include the same index from explanation_targets.
+4. negotiation_email must start with "Dear {company_name}," (or "Dear Hiring Manager," if company_name is empty).
+5. negotiation_email must end with "{user_name}" (or "[Your Name]" if user_name is empty).
+
+Contract type: {contract_label}
+Risk score: {risk_score}
+Verdict: {verdict}
+User requirements: {requirements}
+Company name: {company_name}
+User name: {user_name}
+
+Red flags (context):
+{red_flags_json}
+
+Safe clauses (context):
+{safe_clauses_json}
+
+Explanation targets (rewrite these only):
+{explanation_targets_json}
 """.strip()
