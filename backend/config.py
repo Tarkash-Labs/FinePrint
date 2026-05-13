@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 _ENV_PATH = Path(__file__).resolve().with_name(".env")
 load_dotenv(dotenv_path=_ENV_PATH)
 
+def _parse_csv(value: str) -> tuple[str, ...]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return tuple(items) if items else ("*",)
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str = os.getenv("GEMMA_API_KEY", "")
@@ -17,5 +21,7 @@ class Settings:
     summary_trigger_chars: int = int(os.getenv("SUMMARY_TRIGGER_CHARS", "20000"))
     summary_chunk_chars: int = int(os.getenv("SUMMARY_CHUNK_CHARS", "8000"))
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", "10485760"))
+    cors_allow_origins: tuple[str, ...] = _parse_csv(os.getenv("CORS_ALLOW_ORIGINS", "*"))
+    cors_allow_credentials: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
 
 settings = Settings()
