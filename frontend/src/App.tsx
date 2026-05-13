@@ -494,6 +494,13 @@ function App() {
   const compatibilityMeta = getCompatibilityMeta(result?.compatibility_score ?? null);
   const verdictMeta = result?.verdict ? VERDICT_META[result.verdict] : null;
   const benchmarkNote = getBenchmarkNote(result?.risk_score ?? null, contractType);
+  const riskPercent = typeof result?.risk_score === 'number'
+    ? Math.min(Math.max(result.risk_score, 0), 100)
+    : 0;
+  const compatibilityPercent = typeof result?.compatibility_score === 'number'
+    ? Math.min(Math.max(result.compatibility_score, 0), 100)
+    : 0;
+  const verdictToneClass = verdictMeta ? `verdict-${verdictMeta.tone}` : 'verdict-neutral';
   const activeStepIndex = streamStatus
     ? (streamStatus.stage === 'done'
         ? ANALYSIS_STEPS.length
@@ -502,202 +509,290 @@ function App() {
   const exportTimestamp = new Date().toISOString().replace('T', ' ').replace('Z', ' UTC');
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <FileText className="text-blue-600 w-6 h-6" />
-            <h1 className="text-xl font-bold text-slate-900 tracking-tight">FinePrint</h1>
+    <div className="app-shell">
+      <header className="app-header">
+        <div className="container flex items-center justify-between py-4">
+          <div className="brand">
+            <div className="brand-mark">
+              <FileText className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-lg">FinePrint</div>
+              <div className="text-xs text-slate-500">AI contract guardian</div>
+            </div>
           </div>
-          <div className="text-sm font-medium text-slate-500">Tarkash Labs x Gemma 4</div>
+          <div className="flex items-center gap-2 text-xs text-slate-600">
+            <span className="pill">Gemma 4</span>
+            <span className="hidden sm:inline">Tarkash Labs</span>
+          </div>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+      <main className="app-main container">
         {!result ? (
-          <div className="space-y-6 max-w-2xl mx-auto">
+          <div className="landing space-y-10 reveal">
             {isLoadingReport ? (
-              <div className="rounded-xl border border-slate-200 bg-white px-4 py-5 text-sm text-slate-600">
+              <div className="card text-sm text-slate-600">
                 Loading shared report...
               </div>
             ) : null}
-            <div className="text-center space-y-2 mb-8">
-              <h2 className="text-3xl font-extrabold text-slate-900">Analyze your contract in seconds</h2>
-              <p className="text-slate-500">Upload a photo or PDF to instantly identify hidden traps.</p>
-            </div>
 
-            <div className="flex items-center justify-center">
-              <div className="inline-flex rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
-                <button
-                  type="button"
-                  onClick={() => { setInputMode('file'); setContractText(''); setError(null); }}
-                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${inputMode === 'file' ? 'bg-blue-600 text-white' : 'text-slate-600'}`}
-                >
-                  Upload File
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setInputMode('text'); setFile(null); setError(null); }}
-                  className={`px-4 py-2 text-sm font-semibold rounded-md transition ${inputMode === 'text' ? 'bg-blue-600 text-white' : 'text-slate-600'}`}
-                >
-                  Paste Text
-                </button>
+            <section className="hero-grid reveal">
+              <div className="space-y-6">
+                <span className="badge badge-glow">Contract intelligence</span>
+                <h2 className="hero-title">
+                  Spot hidden traps <span className="hero-accent">before you sign.</span>
+                </h2>
+                <p className="hero-subtitle">
+                  FinePrint reads contracts like a senior counsel and explains the risk in clear,
+                  actionable language. Upload a PDF or paste the text. Gemma does the rest.
+                </p>
+
+                <div className="hero-stats">
+                  <div className="stat-card">
+                    <div className="stat-value">4</div>
+                    <div className="stat-label">analysis stages</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">3</div>
+                    <div className="stat-label">actionable outputs</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-value">1</div>
+                    <div className="stat-label">shareable report</div>
+                  </div>
+                </div>
+
+                <div className="metric-grid">
+                  <div className="metric-card">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Signals</div>
+                    <div className="mt-2 text-lg font-semibold">Red flags ranked by severity</div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Clarity</div>
+                    <div className="mt-2 text-lg font-semibold">Plain English, clause by clause</div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-widest">Action</div>
+                    <div className="mt-2 text-lg font-semibold">Negotiation-ready rewrites</div>
+                  </div>
+                </div>
+
+                <div className="hero-preview">
+                  <div className="preview-header">
+                    <span className="section-title">Sample verdict</span>
+                    <span className="verdict-chip verdict-amber">NEGOTIATE</span>
+                  </div>
+                  <div className="preview-scores">
+                    <div>
+                      <div className="preview-label">Risk</div>
+                      <div className="preview-value">68</div>
+                    </div>
+                    <div>
+                      <div className="preview-label">Fit</div>
+                      <div className="preview-value">52</div>
+                    </div>
+                    <div>
+                      <div className="preview-label">Flags</div>
+                      <div className="preview-value">5</div>
+                    </div>
+                  </div>
+                  <p className="preview-note">Top issue: non-compete scope spans 18 months.</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <span className="pill"><ShieldCheck className="w-4 h-4" /> Auto summaries</span>
+                  <span className="pill"><AlertTriangle className="w-4 h-4" /> Risk scoring</span>
+                  <span className="pill"><FileText className="w-4 h-4" /> Shareable report</span>
+                </div>
               </div>
-            </div>
 
-            {inputMode === 'file' ? (
-              <div 
-                onDragOver={handleDragOver} onDrop={handleDrop} onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-300 rounded-2xl bg-white p-10 flex flex-col items-center justify-center gap-4 hover:bg-slate-50 cursor-pointer"
-              >
-                <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileChange} />
-                <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center text-blue-600 mb-2">
-                  <Upload className="w-8 h-8" />
+              <div className="card form-panel space-y-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="section-title">Start analysis</div>
+                    <p className="text-sm text-slate-500 mt-2">Upload or paste your contract to begin.</p>
+                  </div>
+                  <span className="text-xs text-slate-400">Secure session</span>
                 </div>
-                <div className="text-center">
-                  <p className="text-lg font-medium text-slate-900">{file ? file.name : "Click or drag to upload"}</p>
-                </div>
-              </div>
-            ) : (
-              <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm">
-                <label className="block text-sm font-semibold text-slate-700 mb-2">Paste Contract Text</label>
-                <textarea
-                  value={contractText} onChange={(e) => setContractText(e.target.value)} rows={8}
-                  className="w-full resize-y rounded-lg border border-slate-300 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-            )}
 
-            <div className="space-y-3">
-              <label className="block text-sm font-semibold text-slate-700">Contract Type</label>
-              <select value={contractType} onChange={(e) => setContractType(e.target.value)} className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500">
-                {CONTRACT_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
-              </select>
-            </div>
+                <div className="form-steps">
+                  <div className="form-step is-active"><span>01</span> Upload</div>
+                  <div className="form-step"><span>02</span> Preferences</div>
+                  <div className="form-step"><span>03</span> Analyze</div>
+                </div>
 
-            {/* Structured Hybrid Form */}
-            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm space-y-4">
-              <h3 className="text-sm font-bold text-slate-800 border-b pb-2">Your Guardrails & Requirements</h3>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Target Role</label>
-                  <input type="text" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. SDE, Intern" className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                <div className="flex items-center justify-center">
+                  <div className="tab-switch">
+                    <button
+                      type="button"
+                      onClick={() => { setInputMode('file'); setContractText(''); setError(null); }}
+                      className={`tab-button ${inputMode === 'file' ? 'is-active' : ''}`}
+                    >
+                      Upload File
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setInputMode('text'); setFile(null); setError(null); }}
+                      className={`tab-button ${inputMode === 'text' ? 'is-active' : ''}`}
+                    >
+                      Paste Text
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Min. Comp/Stipend</label>
-                  <input type="text" value={compensation} onChange={e => setCompensation(e.target.value)} placeholder="e.g. ₹50k/mo" className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Max Duration / Bond</label>
-                  <select value={duration} onChange={e => setDuration(e.target.value)} className="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
-                    <option>&lt; 6 Months</option>
-                    <option>1 Year</option>
-                    <option>2 Years</option>
-                    <option>No Limit</option>
+
+                {inputMode === 'file' ? (
+                  <div
+                    onDragOver={handleDragOver}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`dropzone cursor-pointer ${file ? 'has-file' : ''}`}
+                  >
+                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileChange} />
+                    <div className="w-14 h-14 bg-white/80 rounded-full flex items-center justify-center text-teal-700 mx-auto mb-3">
+                      <Upload className="w-7 h-7" />
+                    </div>
+                    <p className="text-base font-semibold text-slate-900">{file ? file.name : "Click or drag to upload"}</p>
+                    <p className="text-xs text-slate-500 mt-2">PDF, PNG, JPG accepted</p>
+                  </div>
+                ) : (
+                  <div className="card-muted rounded-2xl p-5">
+                    <label className="block text-sm font-semibold text-slate-700 mb-2">Paste Contract Text</label>
+                    <textarea
+                      value={contractText} onChange={(e) => setContractText(e.target.value)} rows={8}
+                      className="w-full resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-teal-600 focus:border-transparent"
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-slate-700">Contract Type</label>
+                  <select value={contractType} onChange={(e) => setContractType(e.target.value)} className="w-full bg-white border border-slate-200 rounded-lg px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-teal-600">
+                    {CONTRACT_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
                   </select>
                 </div>
-                <div className="flex items-center justify-between px-2 pt-5">
-                  <label className="text-xs font-semibold text-slate-600">Need Side Projects?</label>
-                  <input type="checkbox" checked={sideProjects} onChange={e => setSideProjects(e.target.checked)} className="w-4 h-4 rounded text-blue-600"/>
-                </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1">Additional Needs (Free Text)</label>
-                <textarea
-                  value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={2}
-                  placeholder="Example: Need flexible hours for exams..."
-                  className="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-            </div>
+                <div className="card-muted rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200 pb-2">Your Guardrails</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Target Role</label>
+                      <input type="text" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. SDE, Intern" className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Min. Comp/Stipend</label>
+                      <input type="text" value={compensation} onChange={e => setCompensation(e.target.value)} placeholder="e.g. ₹50k/mo" className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">Max Duration / Bond</label>
+                      <select value={duration} onChange={e => setDuration(e.target.value)} className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600">
+                        <option>&lt; 6 Months</option>
+                        <option>1 Year</option>
+                        <option>2 Years</option>
+                        <option>No Limit</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center justify-between px-2 pt-5">
+                      <label className="text-xs font-semibold text-slate-600">Need Side Projects?</label>
+                      <input type="checkbox" checked={sideProjects} onChange={e => setSideProjects(e.target.checked)} className="w-4 h-4 rounded text-teal-600"/>
+                    </div>
+                  </div>
 
-            {/* Email Generator Context */}
-            <div className="border border-slate-200 rounded-2xl bg-white p-6 shadow-sm space-y-4">
-              <h3 className="text-sm font-bold text-slate-800 border-b pb-2">Negotiation Details</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="relative">
-                  <Building className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                  <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Company Name" className="w-full pl-9 pr-3 py-2 border rounded-md text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Additional Needs</label>
+                    <textarea
+                      value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={2}
+                      placeholder="Example: Need flexible hours for exams..."
+                      className="w-full resize-y rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"
+                    />
+                  </div>
                 </div>
-                <div className="relative">
-                  <User className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                  <input type="text" value={userName} onChange={e => setUserName(e.target.value)} placeholder="Your Full Name" className="w-full pl-9 pr-3 py-2 border rounded-md text-sm outline-none focus:ring-1 focus:ring-blue-500"/>
-                </div>
-              </div>
-            </div>
 
-            <div className="flex gap-2 flex-wrap">
-              <span className="text-xs text-slate-500 font-medium self-center">Try an example:</span>
-              {EXAMPLES.map(ex => (
+                <div className="card-muted rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200 pb-2">Negotiation Details</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="relative">
+                      <Building className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                      <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Company Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                    </div>
+                    <div className="relative">
+                      <User className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                      <input type="text" value={userName} onChange={e => setUserName(e.target.value)} placeholder="Your Full Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 flex-wrap items-center">
+                  <span className="text-xs text-slate-500 font-medium">Try an example:</span>
+                  {EXAMPLES.map(ex => (
+                    <button
+                      key={ex.label}
+                      type="button"
+                      onClick={() => {
+                        setInputMode('text');
+                        setContractText(ex.text);
+                        setContractType(ex.type);
+                      }}
+                      className="btn-ghost btn-ghost--small text-xs"
+                    >
+                      {ex.label}
+                    </button>
+                  ))}
+                </div>
+
                 <button
-                  key={ex.label}
-                  type="button"
-                  onClick={() => {
-                    setInputMode('text');
-                    setContractText(ex.text);
-                    setContractType(ex.type);
-                  }}
-                  className="text-xs px-3 py-1.5 rounded-full border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 font-medium transition"
+                  onClick={handleAnalyze}
+                  disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
+                  className="btn-primary w-full disabled:opacity-50"
                 >
-                  {ex.label}
+                  {isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract'}
                 </button>
-              ))}
-            </div>
 
-            <button 
-              onClick={handleAnalyze}
-              disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-lg px-4 py-3 shadow-sm transition-all"
-            >
-              {isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract'}
-            </button>
+                {(isAnalyzing || streamStatus?.stage === 'done') && (
+                  <div className="w-full space-y-3 mt-2 animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      {ANALYSIS_STEPS.map((step, index) => {
+                        const isDone = activeStepIndex > index;
+                        const isActive = activeStepIndex === index;
+                        return (
+                          <div key={step.key} className="flex items-center gap-2 flex-1">
+                            <div
+                              className={`step-dot transition ${
+                                isDone
+                                  ? 'bg-emerald-500'
+                                  : isActive
+                                    ? 'bg-teal-500 animate-pulse'
+                                    : 'bg-slate-300'
+                              }`}
+                            />
+                            <span
+                              className={`text-xs font-semibold uppercase tracking-wider ${
+                                isDone || isActive ? 'text-slate-700' : 'text-slate-400'
+                              }`}
+                            >
+                              {step.label}
+                            </span>
+                            {index < ANALYSIS_STEPS.length - 1 && (
+                              <div
+                                className={`h-px flex-1 ${
+                                  isDone ? 'bg-emerald-400' : 'bg-slate-200'
+                                }`}
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="text-xs text-slate-500 flex items-center gap-2">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-teal-500" />
+                      {streamStatus?.message || 'Processing...'}
+                    </div>
+                  </div>
+                )}
 
-            {/* Streaming Progress Stepper */}
-            {(isAnalyzing || streamStatus?.stage === 'done') && (
-              <div className="w-full space-y-3 mt-4 animate-fade-in">
-                <div className="flex items-center gap-2">
-                  {ANALYSIS_STEPS.map((step, index) => {
-                    const isDone = activeStepIndex > index;
-                    const isActive = activeStepIndex === index;
-                    return (
-                      <div key={step.key} className="flex items-center gap-2 flex-1">
-                        <div
-                          className={`h-3 w-3 rounded-full transition ${
-                            isDone
-                              ? 'bg-emerald-500'
-                              : isActive
-                                ? 'bg-blue-500 animate-pulse'
-                                : 'bg-slate-300'
-                          }`}
-                        />
-                        <span
-                          className={`text-xs font-semibold uppercase tracking-wider ${
-                            isDone || isActive ? 'text-slate-700' : 'text-slate-400'
-                          }`}
-                        >
-                          {step.label}
-                        </span>
-                        {index < ANALYSIS_STEPS.length - 1 && (
-                          <div
-                            className={`h-px flex-1 ${
-                              isDone ? 'bg-emerald-400' : 'bg-slate-200'
-                            }`}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="text-xs text-slate-500 flex items-center gap-2">
-                  <span className="inline-flex h-2 w-2 rounded-full bg-blue-500" />
-                  {streamStatus?.message || 'Processing...'}
-                </div>
+                {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
               </div>
-            )}
-
-            {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+            </section>
           </div>
         ) : (
           <div className="space-y-8 export-root" ref={reportRef} data-export-root="true">
@@ -737,7 +832,7 @@ function App() {
               ) : null}
             </div>
 
-            <div className="flex items-center justify-between border-b pb-4 screen-only" data-export-ignore="true">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-4 screen-only" data-export-ignore="true">
               <div>
                 <h2 className="text-2xl font-bold flex items-center gap-3">
                   Analysis Results
@@ -759,11 +854,11 @@ function App() {
                 )}
               </div>
               <div className="flex gap-3">
-                <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="text-sm font-semibold bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition disabled:opacity-50">
+                <button onClick={handleDownloadPDF} disabled={isAnalyzing || isExporting} className="btn-secondary flex items-center gap-2 disabled:opacity-50">
                   {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                   {isExporting ? 'Exporting…' : 'Export PDF'}
                 </button>
-                <button onClick={() => { setResult(null); setFile(null); setError(null); setContractText(''); }} className="text-sm font-medium bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded-lg transition">
+                <button onClick={() => { setResult(null); setFile(null); setError(null); setContractText(''); }} className="btn-ghost text-sm">
                   New Analysis
                 </button>
               </div>
@@ -776,19 +871,19 @@ function App() {
             )}
 
             {shareUrl ? (
-              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm screen-only">
+              <div className="card screen-only">
                 <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Shareable Report Link</div>
                 <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
                   <input
                     type="text"
                     readOnly
                     value={shareUrl}
-                    className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-700"
+                    className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700"
                   />
                   <button
                     type="button"
                     onClick={() => navigator.clipboard.writeText(shareUrl)}
-                    className="text-xs font-semibold bg-slate-900 text-white px-3 py-2 rounded-md"
+                    className="btn-secondary text-xs"
                   >
                     Copy Link
                   </button>
@@ -796,19 +891,61 @@ function App() {
               </div>
             ) : null}
 
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+            <div className="report-hero card screen-only reveal">
+              <div className="report-hero-main">
+                <div className="section-title">Executive snapshot</div>
+                <div className="report-verdict">
+                  <span className={`verdict-chip ${verdictToneClass}`}>{verdictMeta?.label ?? 'PENDING'}</span>
+                  <span className="report-verdict-text">{verdictMeta?.description ?? 'Verdict pending.'}</span>
+                </div>
+                <p className="report-reason">
+                  {result.verdict_reason || (isAnalyzing ? 'Computing verdict...' : 'Verdict pending.')}
+                </p>
+                <div className="report-meta">
+                  <span className="pill">Contract: {CONTRACT_TYPES.find(c => c.id === contractType)?.label || 'General Contract'}</span>
+                  <span className="pill">Share-ready report</span>
+                </div>
+              </div>
+              <div className="report-hero-scores">
+                <div className="score-block">
+                  <div className="score-label">Risk score</div>
+                  <div className="score-row">
+                    <span className="score-value">{result.risk_score !== null ? result.risk_score : '--'}</span>
+                    <span className="score-unit">/ 100</span>
+                  </div>
+                  <div className="score-bar">
+                    <span style={{ width: `${riskPercent}%` }} />
+                  </div>
+                  <div className="score-foot">{riskMeta.description}</div>
+                  {benchmarkNote && <div className="score-note">{benchmarkNote}</div>}
+                </div>
+                <div className="score-block">
+                  <div className="score-label">Compatibility</div>
+                  <div className="score-row">
+                    <span className="score-value">{result.compatibility_score !== null ? result.compatibility_score : '--'}</span>
+                    <span className="score-unit">/ 100</span>
+                  </div>
+                  <div className="score-bar">
+                    <span style={{ width: `${compatibilityPercent}%` }} />
+                  </div>
+                  <div className="score-foot">{compatibilityMeta.description}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card summary-card">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">TL;DR Summary</h3>
                 <span className="text-[11px] font-semibold text-slate-400">3-sentence brief</span>
               </div>
-              <p className="mt-3 text-sm text-slate-700 leading-relaxed">
+              <p className="mt-3 text-sm text-slate-700 leading-relaxed serif">
                 {result.summary || (isAnalyzing ? 'Generating summary...' : 'Summary not available.')}
               </p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3 screen-only">
+            <div className="report-grid screen-only reveal">
               {/* Risk Score */}
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <div className="card flex flex-col justify-between">
                 <div>
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Risk Score</h3>
@@ -832,7 +969,7 @@ function App() {
               </div>
 
               {/* Compatibility Score & Checklist */}
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+              <div className="card flex flex-col">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Compatibility</h3>
                   <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[compatibilityMeta.tone].badge}`}>{compatibilityMeta.label}</span>
@@ -858,7 +995,7 @@ function App() {
               </div>
 
               {/* Verdict */}
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+              <div className="card flex flex-col">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Final Verdict</h3>
                   {verdictMeta && <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[verdictMeta.tone].badge}`}>{verdictMeta.label}</span>}
@@ -882,9 +1019,9 @@ function App() {
                 {result.red_flags.map((flag, i) => {
                   const isExpanded = expandedFlags.includes(i);
                   return (
-                    <div key={i} className="bg-white border border-red-200 rounded-xl overflow-hidden shadow-sm transition-all hover:border-red-300">
+                    <div key={i} className="clause-card transition-all hover:border-red-300">
                       <div 
-                        className="p-5 flex justify-between items-start cursor-pointer bg-red-50/50"
+                        className="clause-header flex justify-between items-start cursor-pointer"
                         onClick={() => toggleFlag(i)}
                       >
                         <div className="flex-grow pr-4">
@@ -978,7 +1115,7 @@ function App() {
                                 type="button"
                                 onClick={() => handleAskClause(i)}
                                 disabled={clauseChats[i]?.isLoading}
-                                className="text-xs font-semibold bg-slate-900 text-white px-3 py-2 rounded-md disabled:opacity-50"
+                                className="btn-secondary text-xs disabled:opacity-50"
                               >
                                 {clauseChats[i]?.isLoading ? 'Asking…' : 'Ask'}
                               </button>
@@ -999,7 +1136,7 @@ function App() {
 
             {/* Email Generator UI */}
             {(!isAnalyzing || result.negotiation_email) && result.red_flags.length > 0 && (
-                <div className="space-y-4 mt-8 bg-blue-50/50 p-6 rounded-2xl border border-blue-100 negotiation-block">
+                <div className="space-y-4 mt-8 card negotiation-block">
                   <div className="flex items-center justify-between border-b border-blue-200 pb-2 negotiation-header">
                     <h3 className="font-bold flex items-center gap-2 text-blue-900">
                       Draft Negotiation Email
@@ -1016,7 +1153,7 @@ function App() {
                     )}
                  </div>
                  {result.negotiation_email ? (
-                   <div className="bg-white border border-blue-200 rounded-lg p-5 text-sm text-slate-700 whitespace-pre-wrap font-serif leading-relaxed shadow-inner negotiation-body">
+                   <div className="bg-white border border-blue-200 rounded-lg p-5 text-sm text-slate-700 whitespace-pre-wrap serif leading-relaxed shadow-inner negotiation-body">
                      {result.negotiation_email}
                    </div>
                  ) : (
