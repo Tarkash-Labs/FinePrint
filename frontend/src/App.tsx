@@ -92,6 +92,12 @@ const ANALYSIS_STEPS = [
   { key: 'email', label: 'Email' },
 ];
 
+const EXAMPLES = [
+  { label: '🎓 Campus Bond', type: 'internship', text: `1. Position: Software Engineering Intern at Initech Solutions.\n2. Compensation: This is an unpaid position. No stipend will be provided.\n3. Intellectual Property: All software and code created during the term, including on personal time using personal equipment, shall become exclusive property of Initech Solutions.\n4. Bond: If hired full-time, intern must stay 3 years or pay ₹10,00,000 penalty.\n5. Working Hours: Standard hours 10 AM–7 PM. Nights and weekends expected during deadlines.\n6. Non-Compete: Cannot join any competitor for 18 months after leaving.` },
+  { label: '📝 Predatory NDA', type: 'freelance', text: `1. IP Assignment: All work product, including work on personal time using personal tools, is owned exclusively by Client.\n2. Non-Solicitation: Freelancer may not work with Client's clients or competitors for 24 months.\n3. Payment: Client may withhold payment if deliverables deemed unsatisfactory at Client's sole discretion.\n4. Exclusivity: No other clients permitted during project without written approval.\n5. Termination: Client may terminate with no notice. Freelancer must give 60 days notice.` },
+  { label: '🏠 Shady Rental', type: 'rental', text: `1. Security Deposit: 6 months rent due before move-in. Refundable at landlord's sole discretion.\n2. Landlord Access: Landlord may enter at any time without notice.\n3. Repairs: Tenant responsible for all repairs under ₹10,000.\n4. Eviction: Landlord may terminate with 7 days notice for any reason.\n5. Auto-Renewal: Agreement auto-renews for 11 months unless tenant gives 60 days written notice.` },
+];
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [inputMode, setInputMode] = useState<'file' | 'text'>('file');
@@ -622,6 +628,24 @@ function App() {
               </div>
             </div>
 
+            <div className="flex gap-2 flex-wrap">
+              <span className="text-xs text-slate-500 font-medium self-center">Try an example:</span>
+              {EXAMPLES.map(ex => (
+                <button
+                  key={ex.label}
+                  type="button"
+                  onClick={() => {
+                    setInputMode('text');
+                    setContractText(ex.text);
+                    setContractType(ex.type);
+                  }}
+                  className="text-xs px-3 py-1.5 rounded-full border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 font-medium transition"
+                >
+                  {ex.label}
+                </button>
+              ))}
+            </div>
+
             <button 
               onClick={handleAnalyze}
               disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
@@ -1036,6 +1060,11 @@ function App() {
                 )}
               </div>
             </div>
+            
+            <p className="text-center text-xs text-slate-400 pt-4 pb-2">
+              FinePrint uses AI and does not constitute legal advice. 
+              Consult a qualified lawyer before signing any binding agreement.
+            </p>
 
           </div>
         )}
