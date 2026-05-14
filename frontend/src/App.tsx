@@ -36,7 +36,7 @@ const REQUIREMENT_FIELDS: Record<string, FieldConfig[]> = {
   rental: [
     { key: 'property', label: 'Property Type', type: 'text', placeholder: 'e.g. 2BHK Apartment' },
     { key: 'deposit', label: 'Max Security Deposit', type: 'text', placeholder: 'e.g. 2 Months Rent' },
-    { key: 'duration', label: 'Lease Duration', type: 'select', options: ['< 6 Months', '11 Months', '1 Year', '2 Years+'] },
+    { key: 'duration', label: 'Lease Duration', type: 'select', options: ['6 Months', '11 Months', '1 Year', '2 Years+'] },
     { key: 'pets', label: 'Pets Allowed?', type: 'checkbox' }
   ],
   vc: [
@@ -73,6 +73,15 @@ type AnalyzeResult = {
   safe_clauses: SafeClause[];
   negotiation_email: string | null;
   timing?: Timing | null;
+};
+
+// NEW: Type for the Comparison Endpoint
+type CompareResult = {
+  summary: string;
+  resolved_flags: string[];
+  new_flags: string[];
+  remaining_flags: string[];
+  overall_change: 'IMPROVED' | 'WORSE' | 'UNCHANGED';
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -145,6 +154,13 @@ function App() {
   const [contractText, setContractText] = useState('');
   const [contractType, setContractType] = useState(CONTRACT_TYPES[0].id);
   
+  // NEW: Compare Mode State
+  const [isCompareMode, setIsCompareMode] = useState(false);
+  const [fileV2, setFileV2] = useState<File | null>(null);
+  const [contractTextV2, setContractTextV2] = useState('');
+  const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
+  const [isComparing, setIsComparing] = useState(false);
+
   // Dynamic Form State
   const [dynamicReqs, setDynamicReqs] = useState<Record<string, any>>({
     sideProjects: true,
@@ -171,6 +187,7 @@ function App() {
   const [expandedFlags, setExpandedFlags] = useState<number[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRefV2 = useRef<HTMLInputElement>(null); // NEW: V2 Ref
   const reportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -203,11 +220,20 @@ function App() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
   };
+  
+  // NEW: Handlers for V2 File
+  const handleFileChangeV2 = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) setFileV2(e.target.files[0]);
+  };
 
   const handleDragOver = (e: React.DragEvent) => e.preventDefault();
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  };
+  const handleDropV2 = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) setFileV2(e.dataTransfer.files[0]);
   };
 
   const toggleFlag = (index: number) => {
@@ -422,6 +448,66 @@ function App() {
 
   const activeFields = REQUIREMENT_FIELDS[contractType] || REQUIREMENT_FIELDS.general;
 
+  // Build the shared dynamic requirements payload
+  const buildRequirementsText = () => {
+    const dynamicFieldsText = activeFields.map(f => {
+      const rawVal = dynamicReqs[f.key];
+      const val = rawVal !== undefined ? rawVal : (f.type === 'select' ? f.options?.[0] : (f.type === 'checkbox' ? false : ''));
+      const displayVal = f.type === 'checkbox' ? (val ? 'Yes' : 'No') : (val || 'Not specified');
+      return `${f.label}: ${displayVal}`;
+    }).join('\n      ');
+
+    return `
+      ${dynamicFieldsText}
+      Additional Notes: ${requirements.trim()}
+    `.trim();
+  };
+
+  // NEW: Handler for Comparison Request
+  const handleCompare = async () => {
+    const trimmedText1 = contractText.trim();
+    const trimmedText2 = contractTextV2.trim();
+
+    if (inputMode === 'file' && (!file || !fileV2)) return setError('Please upload both original and revised files to compare.');
+    if (inputMode === 'text' && (!trimmedText1 || !trimmedText2)) return setError('Please paste both contract texts to compare.');
+
+    setIsComparing(true);
+    setError(null);
+    setCompareResult(null);
+    setResult(null); // Clear standard result
+
+    const formData = new FormData();
+    formData.append('contract_type', contractType);
+    formData.append('requirements', buildRequirementsText());
+    
+    if (inputMode === 'file') {
+      if (file) formData.append('file_v1', file);
+      if (fileV2) formData.append('file_v2', fileV2);
+    } else {
+      formData.append('text_v1', trimmedText1);
+      formData.append('text_v2', trimmedText2);
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/compare`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || `Comparison failed (${response.status})`);
+      }
+
+      const data = await response.json();
+      setCompareResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Comparison failed.');
+    } finally {
+      setIsComparing(false);
+    }
+  };
+
   const handleAnalyze = async () => {
     const trimmedText = contractText.trim();
 
@@ -432,29 +518,17 @@ function App() {
     setError(null);
     setStreamStatus({ stage: 'extract', message: 'Extracting contract text...' });
     setExpandedFlags([]);
+    setCompareResult(null);
     setResult({
       risk_score: null, compatibility_score: null, verdict: null, verdict_reason: null,
-      summary: null,
-      requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null, timing: null
+      summary: null, requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null, timing: null
     });
-
-    const dynamicFieldsText = activeFields.map(f => {
-      const rawVal = dynamicReqs[f.key];
-      const val = rawVal !== undefined ? rawVal : (f.type === 'select' ? f.options?.[0] : (f.type === 'checkbox' ? false : ''));
-      const displayVal = f.type === 'checkbox' ? (val ? 'Yes' : 'No') : (val || 'Not specified');
-      return `${f.label}: ${displayVal}`;
-    }).join('\n      ');
-
-    const combinedRequirements = `
-      ${dynamicFieldsText}
-      Additional Notes: ${requirements.trim()}
-    `.trim();
 
     const formData = new FormData();
     formData.append('contract_type', contractType);
     if (inputMode === 'file' && file) formData.append('file', file);
     if (inputMode === 'text') formData.append('text', trimmedText);
-    formData.append('requirements', combinedRequirements);
+    formData.append('requirements', buildRequirementsText());
     if (companyName.trim()) formData.append('company_name', companyName.trim());
     if (userName.trim()) formData.append('user_name', userName.trim());
 
@@ -551,6 +625,11 @@ function App() {
     : -1;
   const exportTimestamp = new Date().toISOString().replace('T', ' ').replace('Z', ' UTC');
 
+  // Disable submit button based on mode
+  const isSubmitDisabled = isCompareMode
+      ? (isComparing || (inputMode === 'file' ? (!file || !fileV2) : (!contractText.trim() || !contractTextV2.trim())))
+      : (isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0));
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -572,7 +651,8 @@ function App() {
       </header>
 
       <main className="app-main container">
-        {!result ? (
+        {/* Conditional rendering based on whether we have results to show */}
+        {!result && !compareResult ? (
           <div className="landing space-y-10 reveal">
             {isLoadingReport ? (
               <div className="card text-sm text-slate-600">
@@ -656,7 +736,16 @@ function App() {
                     <div className="section-title">Start analysis</div>
                     <p className="text-sm text-slate-500 mt-2">Upload or paste your contract to begin.</p>
                   </div>
-                  <span className="text-xs text-slate-400">Secure session</span>
+                  
+                  {/* NEW: Compare Mode Toggle Switch */}
+                  <label className="flex flex-col items-end gap-1 cursor-pointer group">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Compare Mode</span>
+                    <div className="relative">
+                      <input type="checkbox" className="sr-only" checked={isCompareMode} onChange={e => setIsCompareMode(e.target.checked)} />
+                      <div className={`block w-10 h-6 rounded-full transition ${isCompareMode ? 'bg-teal-600' : 'bg-slate-300'}`}></div>
+                      <div className={`absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition transform ${isCompareMode ? 'translate-x-4' : ''}`}></div>
+                    </div>
+                  </label>
                 </div>
 
                 <div className="form-steps">
@@ -669,14 +758,14 @@ function App() {
                   <div className="tab-switch">
                     <button
                       type="button"
-                      onClick={() => { setInputMode('file'); setContractText(''); setError(null); }}
+                      onClick={() => { setInputMode('file'); setContractText(''); setContractTextV2(''); setError(null); }}
                       className={`tab-button ${inputMode === 'file' ? 'is-active' : ''}`}
                     >
                       Upload File
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setInputMode('text'); setFile(null); setError(null); }}
+                      onClick={() => { setInputMode('text'); setFile(null); setFileV2(null); setError(null); }}
                       className={`tab-button ${inputMode === 'text' ? 'is-active' : ''}`}
                     >
                       Paste Text
@@ -685,26 +774,62 @@ function App() {
                 </div>
 
                 {inputMode === 'file' ? (
-                  <div
-                    onDragOver={handleDragOver}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`dropzone cursor-pointer ${file ? 'has-file' : ''}`}
-                  >
-                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileChange} />
-                    <div className="w-14 h-14 bg-white/80 rounded-full flex items-center justify-center text-teal-700 mx-auto mb-3">
-                      <Upload className="w-7 h-7" />
+                  <div className={`grid gap-4 ${isCompareMode ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
+                    {/* File V1 */}
+                    <div
+                      onDragOver={handleDragOver}
+                      onDrop={handleDrop}
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`dropzone cursor-pointer ${file ? 'has-file' : ''}`}
+                    >
+                      <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileChange} />
+                      <div className="w-14 h-14 bg-white/80 rounded-full flex items-center justify-center text-teal-700 mx-auto mb-3">
+                        <Upload className="w-7 h-7" />
+                      </div>
+                      <p className="text-base font-semibold text-slate-900 text-center">{file ? file.name : (isCompareMode ? "Upload Original" : "Click or drag to upload")}</p>
+                      {!file && <p className="text-xs text-slate-500 mt-2 text-center">PDF, PNG, JPG accepted</p>}
                     </div>
-                    <p className="text-base font-semibold text-slate-900">{file ? file.name : "Click or drag to upload"}</p>
-                    <p className="text-xs text-slate-500 mt-2">PDF, PNG, JPG accepted</p>
+
+                    {/* NEW: File V2 (Only shown in Compare Mode) */}
+                    {isCompareMode && (
+                      <div
+                        onDragOver={handleDragOver}
+                        onDrop={handleDropV2}
+                        onClick={() => fileInputRefV2.current?.click()}
+                        className={`dropzone cursor-pointer ${fileV2 ? 'has-file border-teal-500 bg-teal-50/50' : 'border-dashed'}`}
+                      >
+                        <input type="file" ref={fileInputRefV2} className="hidden" accept="image/*,application/pdf" onChange={handleFileChangeV2} />
+                        <div className="w-14 h-14 bg-white/80 rounded-full flex items-center justify-center text-teal-700 mx-auto mb-3">
+                          <Upload className="w-7 h-7" />
+                        </div>
+                        <p className="text-base font-semibold text-slate-900 text-center">{fileV2 ? fileV2.name : "Upload Revised"}</p>
+                        {!fileV2 && <p className="text-xs text-slate-500 mt-2 text-center">Upload the newer version</p>}
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <div className="card-muted rounded-2xl p-5">
-                    <label className="block text-sm font-semibold text-slate-700 mb-2">Paste Contract Text</label>
-                    <textarea
-                      value={contractText} onChange={(e) => setContractText(e.target.value)} rows={8}
-                      className="w-full resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-teal-600 focus:border-transparent"
-                    />
+                  <div className={`grid gap-4 ${isCompareMode ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
+                    {/* Text V1 */}
+                    <div className="card-muted rounded-2xl p-5">
+                      <label className="block text-sm font-semibold text-slate-700 mb-2">
+                        {isCompareMode ? "Original Contract Text" : "Paste Contract Text"}
+                      </label>
+                      <textarea
+                        value={contractText} onChange={(e) => setContractText(e.target.value)} rows={8}
+                        className="w-full resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-teal-600 focus:border-transparent"
+                      />
+                    </div>
+                    
+                    {/* NEW: Text V2 (Only shown in Compare Mode) */}
+                    {isCompareMode && (
+                      <div className="card-muted rounded-2xl p-5">
+                        <label className="block text-sm font-semibold text-slate-700 mb-2">Revised Contract Text</label>
+                        <textarea
+                          value={contractTextV2} onChange={(e) => setContractTextV2(e.target.value)} rows={8}
+                          className="w-full resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-teal-600 focus:border-transparent"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -759,19 +884,21 @@ function App() {
                   </div>
                 </div>
 
-                <div className="card-muted rounded-2xl p-5 space-y-4">
-                  <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200 pb-2">Negotiation Details</h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="relative">
-                      <Building className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                      <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Company Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
-                    </div>
-                    <div className="relative">
-                      <User className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                      <input type="text" value={userName} onChange={e => setUserName(e.target.value)} placeholder="Your Full Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                {!isCompareMode && (
+                  <div className="card-muted rounded-2xl p-5 space-y-4">
+                    <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200 pb-2">Negotiation Details</h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="relative">
+                        <Building className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                        <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Company Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                      </div>
+                      <div className="relative">
+                        <User className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                        <input type="text" value={userName} onChange={e => setUserName(e.target.value)} placeholder="Your Full Name" className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-md text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
 
                 <div className="flex gap-2 flex-wrap items-center">
                   <span className="text-xs text-slate-500 font-medium">Try an example:</span>
@@ -783,6 +910,7 @@ function App() {
                         setInputMode('text');
                         setContractText(ex.text);
                         setContractType(ex.type);
+                        setIsCompareMode(false); // Disable compare to easily view example
                       }}
                       className="btn-ghost btn-ghost--small text-xs"
                     >
@@ -792,14 +920,17 @@ function App() {
                 </div>
 
                 <button
-                  onClick={handleAnalyze}
-                  disabled={isAnalyzing || (inputMode === 'file' ? !file : contractText.trim().length === 0)}
+                  onClick={isCompareMode ? handleCompare : handleAnalyze}
+                  disabled={isSubmitDisabled}
                   className="btn-primary w-full disabled:opacity-50"
                 >
-                  {isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract'}
+                  {isCompareMode
+                    ? (isComparing ? 'Comparing Versions...' : 'Compare Contracts')
+                    : (isAnalyzing ? 'Analyzing Pipeline...' : 'Analyze Contract')}
                 </button>
 
-                {(isAnalyzing || streamStatus?.stage === 'done') && (
+                {/* Progress Indicators */}
+                {(isAnalyzing || streamStatus?.stage === 'done') && !isCompareMode && (
                   <div className="w-full space-y-3 mt-2 animate-fade-in">
                     <div className="flex items-center gap-2">
                       {ANALYSIS_STEPS.map((step, index) => {
@@ -809,26 +940,14 @@ function App() {
                           <div key={step.key} className="flex items-center gap-2 flex-1">
                             <div
                               className={`step-dot transition ${
-                                isDone
-                                  ? 'bg-emerald-500'
-                                  : isActive
-                                    ? 'bg-teal-500 animate-pulse'
-                                    : 'bg-slate-300'
+                                isDone ? 'bg-emerald-500' : isActive ? 'bg-teal-500 animate-pulse' : 'bg-slate-300'
                               }`}
                             />
-                            <span
-                              className={`text-xs font-semibold uppercase tracking-wider ${
-                                isDone || isActive ? 'text-slate-700' : 'text-slate-400'
-                              }`}
-                            >
+                            <span className={`text-xs font-semibold uppercase tracking-wider ${isDone || isActive ? 'text-slate-700' : 'text-slate-400'}`}>
                               {step.label}
                             </span>
                             {index < ANALYSIS_STEPS.length - 1 && (
-                              <div
-                                className={`h-px flex-1 ${
-                                  isDone ? 'bg-emerald-400' : 'bg-slate-200'
-                                }`}
-                              />
+                              <div className={`h-px flex-1 ${isDone ? 'bg-emerald-400' : 'bg-slate-200'}`} />
                             )}
                           </div>
                         );
@@ -840,13 +959,92 @@ function App() {
                     </div>
                   </div>
                 )}
+                
+                {isComparing && (
+                  <div className="text-xs text-teal-600 flex items-center justify-center gap-2 mt-4 font-semibold animate-pulse">
+                    <Loader2 className="w-4 h-4 animate-spin" /> Concurrently analyzing revisions...
+                  </div>
+                )}
 
                 {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
               </div>
             </section>
           </div>
-        ) : (
-          <div className="space-y-8 export-root" ref={reportRef} data-export-root="true">
+
+        ) : compareResult ? (
+          
+          /* --- NEW: COMPARE RESULT UI --- */
+          <div className="space-y-8 export-root animate-fade-in">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-4 gap-4 screen-only">
+              <div>
+                <h2 className="text-2xl font-bold flex items-center gap-3 text-slate-900">
+                  Version Comparison
+                  <span className={`text-xs px-2 py-1 rounded-full uppercase tracking-wider font-bold ${
+                    compareResult.overall_change === 'IMPROVED' ? 'bg-green-100 text-green-700' :
+                    compareResult.overall_change === 'WORSE' ? 'bg-red-100 text-red-700' :
+                    'bg-slate-200 text-slate-700'
+                  }`}>
+                    {compareResult.overall_change}
+                  </span>
+                </h2>
+                <p className="text-sm text-slate-500 mt-1">Comparing Original vs Revised flags</p>
+              </div>
+              <div>
+                <button onClick={() => { setCompareResult(null); setIsCompareMode(false); setFile(null); setFileV2(null); setContractText(''); setContractTextV2(''); }} className="btn-secondary text-sm">
+                  New Analysis
+                </button>
+              </div>
+            </div>
+
+            <div className="card summary-card">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Delta Summary</h3>
+              </div>
+              <p className="mt-3 text-sm text-slate-800 leading-relaxed font-medium">
+                {compareResult.summary}
+              </p>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3 items-start">
+              <div className="card border-l-4 border-l-green-500">
+                <h4 className="text-sm font-bold text-green-800 mb-4 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4" /> Resolved Flags
+                </h4>
+                <ul className="space-y-2">
+                  {compareResult.resolved_flags.length > 0 ? compareResult.resolved_flags.map((f, i) => (
+                    <li key={i} className="text-sm text-slate-700 bg-green-50 px-3 py-2 rounded-md border border-green-100">{f}</li>
+                  )) : <li className="text-sm text-slate-400 italic">No flags were resolved in this revision.</li>}
+                </ul>
+              </div>
+              
+              <div className="card border-l-4 border-l-red-500">
+                <h4 className="text-sm font-bold text-red-800 mb-4 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> New Risks Introduced
+                </h4>
+                <ul className="space-y-2">
+                  {compareResult.new_flags.length > 0 ? compareResult.new_flags.map((f, i) => (
+                    <li key={i} className="text-sm text-slate-700 bg-red-50 px-3 py-2 rounded-md border border-red-100">{f}</li>
+                  )) : <li className="text-sm text-slate-400 italic">No new risky clauses detected.</li>}
+                </ul>
+              </div>
+              
+              <div className="card border-l-4 border-l-amber-500">
+                <h4 className="text-sm font-bold text-amber-800 mb-4 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> Remaining Flags
+                </h4>
+                <ul className="space-y-2">
+                  {compareResult.remaining_flags.length > 0 ? compareResult.remaining_flags.map((f, i) => (
+                    <li key={i} className="text-sm text-slate-700 bg-amber-50 px-3 py-2 rounded-md border border-amber-100">{f}</li>
+                  )) : <li className="text-sm text-slate-400 italic">No flags remaining from the original.</li>}
+                </ul>
+              </div>
+            </div>
+          </div>
+
+        ) : result ? (
+
+          /* --- EXISTING: ANALYSIS RESULT UI --- */
+          <div className="space-y-8 export-root animate-fade-in" ref={reportRef} data-export-root="true">
             <div className="hidden pdf-only">
               <div className="flex items-start justify-between border-b border-slate-200 pb-4">
                 <div>
@@ -1255,7 +1453,7 @@ function App() {
             </p>
 
           </div>
-        )}
+        ) : null}
       </main>
     </div>
   );
