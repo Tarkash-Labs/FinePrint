@@ -11,6 +11,47 @@ const CONTRACT_TYPES = [
   { id: 'general', label: 'General Contract' },
 ];
 
+type FieldConfig = { key: string; label: string; type: 'text' | 'select' | 'checkbox'; options?: string[]; placeholder?: string; };
+
+const REQUIREMENT_FIELDS: Record<string, FieldConfig[]> = {
+  employment: [
+    { key: 'role', label: 'Target Role', type: 'text', placeholder: 'e.g. SDE, Manager' },
+    { key: 'compensation', label: 'Min. Compensation', type: 'text', placeholder: 'e.g. ₹50k/mo' },
+    { key: 'duration', label: 'Max Duration / Bond', type: 'select', options: ['< 6 Months', '1 Year', '2 Years', 'No Limit'] },
+    { key: 'sideProjects', label: 'Need Side Projects?', type: 'checkbox' },
+    { key: 'relocation', label: 'Open to Relocation?', type: 'checkbox' }
+  ],
+  internship: [
+    { key: 'role', label: 'Target Role', type: 'text', placeholder: 'e.g. SDE Intern' },
+    { key: 'compensation', label: 'Min. Stipend', type: 'text', placeholder: 'e.g. ₹20k/mo' },
+    { key: 'duration', label: 'Max Duration', type: 'select', options: ['< 6 Months', '1 Year', 'No Limit'] },
+    { key: 'sideProjects', label: 'Need Side Projects?', type: 'checkbox' }
+  ],
+  freelance: [
+    { key: 'scope', label: 'Project Scope', type: 'text', placeholder: 'e.g. Web App UI' },
+    { key: 'compensation', label: 'Min. Payment', type: 'text', placeholder: 'e.g. ₹1L total' },
+    { key: 'duration', label: 'Expected Duration', type: 'select', options: ['< 1 Month', '< 3 Months', '6 Months', 'Ongoing'] },
+    { key: 'exclusivity', label: 'Agree to Exclusivity?', type: 'checkbox' }
+  ],
+  rental: [
+    { key: 'property', label: 'Property Type', type: 'text', placeholder: 'e.g. 2BHK Apartment' },
+    { key: 'deposit', label: 'Max Security Deposit', type: 'text', placeholder: 'e.g. 2 Months Rent' },
+    { key: 'duration', label: 'Lease Duration', type: 'select', options: ['< 6 Months', '11 Months', '1 Year', '2 Years+'] },
+    { key: 'pets', label: 'Pets Allowed?', type: 'checkbox' }
+  ],
+  vc: [
+    { key: 'valuation', label: 'Target Valuation', type: 'text', placeholder: 'e.g. $10M Post-money' },
+    { key: 'investment', label: 'Target Investment', type: 'text', placeholder: 'e.g. $2M' },
+    { key: 'boardSeats', label: 'Give up Board Seat?', type: 'checkbox' }
+  ],
+  tos: [
+    { key: 'usage', label: 'Primary Usage', type: 'text', placeholder: 'e.g. Personal, Business' },
+  ],
+  general: [
+    { key: 'goal', label: 'Primary Goal', type: 'text', placeholder: 'e.g. Partnership' },
+  ]
+};
+
 type Severity = 'high' | 'medium' | 'low';
 type Verdict = 'ACCEPT' | 'NEGOTIATE' | 'REJECT';
 
@@ -93,7 +134,7 @@ const ANALYSIS_STEPS = [
 ];
 
 const EXAMPLES = [
-  { label: '🎓 Campus Bond', type: 'internship', text: `1. Position: Software Engineering Intern at Initech Solutions.\n2. Compensation: This is an unpaid position. No stipend will be provided.\n3. Intellectual Property: All software and code created during the term, including on personal time using personal equipment, shall become exclusive property of Initech Solutions.\n4. Bond: If hired full-time, intern must stay 3 years or pay ₹10,00,000 penalty.\n5. Working Hours: Standard hours 10 AM–7 PM. Nights and weekends expected during deadlines.\n6. Non-Compete: Cannot join any competitor for 18 months after leaving.` },
+  { label: '🎓 Campus Bond', type: 'internship', text: `1. Position: Software Engineering Intern at Initech Solutions.\n2. Compensation: This is an unpaid position. No stipend will be provided.\n3. Intellectual Property: All software and code created during the term, including on personal time using personal equipment, shall become exclusive property of Initech Solutions.\n4. Bond: If hired full-time, intern must stay 3 years or pay ₹10,000,000 penalty.\n5. Working Hours: Standard hours 10 AM–7 PM. Nights and weekends expected during deadlines.\n6. Non-Compete: Cannot join any competitor for 18 months after leaving.` },
   { label: '📝 Predatory NDA', type: 'freelance', text: `1. IP Assignment: All work product, including work on personal time using personal tools, is owned exclusively by Client.\n2. Non-Solicitation: Freelancer may not work with Client's clients or competitors for 24 months.\n3. Payment: Client may withhold payment if deliverables deemed unsatisfactory at Client's sole discretion.\n4. Exclusivity: No other clients permitted during project without written approval.\n5. Termination: Client may terminate with no notice. Freelancer must give 60 days notice.` },
   { label: '🏠 Shady Rental', type: 'rental', text: `1. Security Deposit: 6 months rent due before move-in. Refundable at landlord's sole discretion.\n2. Landlord Access: Landlord may enter at any time without notice.\n3. Repairs: Tenant responsible for all repairs under ₹10,000.\n4. Eviction: Landlord may terminate with 7 days notice for any reason.\n5. Auto-Renewal: Agreement auto-renews for 11 months unless tenant gives 60 days written notice.` },
 ];
@@ -104,12 +145,16 @@ function App() {
   const [contractText, setContractText] = useState('');
   const [contractType, setContractType] = useState(CONTRACT_TYPES[0].id);
   
-  // Form State
-  const [role, setRole] = useState('');
-  const [duration, setDuration] = useState('1 Year');
-  const [sideProjects, setSideProjects] = useState(true);
-  const [relocation] = useState(false);
-  const [compensation, setCompensation] = useState('');
+  // Dynamic Form State
+  const [dynamicReqs, setDynamicReqs] = useState<Record<string, any>>({
+    sideProjects: true,
+    relocation: false,
+    exclusivity: false,
+    pets: false,
+    boardSeats: false,
+  });
+  
+  // Universal Form State
   const [requirements, setRequirements] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [userName, setUserName] = useState('');
@@ -334,15 +379,12 @@ function App() {
           windowWidth: exportWidth,
           windowHeight: exportHeight,
           onclone: (doc: Document) => {
-            // 1. Add pdf-export class for our explicit hex overrides
             doc.documentElement.classList.add('pdf-export');
-            // Ensure a neutral background to avoid oklch tokens
             doc.body.style.backgroundColor = '#ffffff';
             doc.body.style.margin = '0';
             doc.body.style.padding = '0';
             doc.documentElement.style.margin = '0';
             doc.documentElement.style.padding = '0';
-            // 2. Inject explicit hex color overrides FIRST
             const style = doc.createElement('style');
             style.textContent = exportStyles;
             doc.head.appendChild(style);
@@ -355,14 +397,11 @@ function App() {
               exportRoot.style.transform = 'none';
               exportRoot.style.left = '0';
             }
-            // Force background/gradient cleanup on common wrappers
             doc.querySelectorAll<HTMLElement>('*').forEach((el) => {
               if (el.style && el.style.backgroundImage) {
                 el.style.backgroundImage = 'none';
               }
             });
-            // 3. Walk every element and replace any remaining oklch / color-mix values
-            //    Do NOT remove stylesheets — they contain our overrides
             sanitizeUnsupportedColors(doc);
           }
         },
@@ -381,6 +420,8 @@ function App() {
     }
   };
 
+  const activeFields = REQUIREMENT_FIELDS[contractType] || REQUIREMENT_FIELDS.general;
+
   const handleAnalyze = async () => {
     const trimmedText = contractText.trim();
 
@@ -397,12 +438,15 @@ function App() {
       requirement_breakdown: [], red_flags: [], safe_clauses: [], negotiation_email: null, timing: null
     });
 
+    const dynamicFieldsText = activeFields.map(f => {
+      const rawVal = dynamicReqs[f.key];
+      const val = rawVal !== undefined ? rawVal : (f.type === 'select' ? f.options?.[0] : (f.type === 'checkbox' ? false : ''));
+      const displayVal = f.type === 'checkbox' ? (val ? 'Yes' : 'No') : (val || 'Not specified');
+      return `${f.label}: ${displayVal}`;
+    }).join('\n      ');
+
     const combinedRequirements = `
-      Role: ${role || 'Not specified'}
-      Expected Duration: ${duration}
-      Side Projects Allowed: ${sideProjects ? 'Yes' : 'No'}
-      Open to Relocation: ${relocation ? 'Yes' : 'No'}
-      Minimum Compensation: ${compensation || 'Not specified'}
+      ${dynamicFieldsText}
       Additional Notes: ${requirements.trim()}
     `.trim();
 
@@ -434,7 +478,6 @@ function App() {
         buffer += decoder.decode(value, { stream: true });
         let boundary = buffer.indexOf('\n\n');
         
-        // Robust SSE Parsing logic
         while (boundary !== -1) {
           const chunk = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
@@ -443,7 +486,7 @@ function App() {
           if (!chunk.trim()) continue;
           
           const eventMatch = chunk.match(/event:\s*([^\n]*)/);
-          const dataMatch = chunk.match(/data:\s*(.*)/s); // /s flag for multiline json
+          const dataMatch = chunk.match(/data:\s*(.*)/s); 
           
           if (eventMatch && dataMatch) {
             const eventType = eventMatch[1].trim();
@@ -675,27 +718,35 @@ function App() {
                 <div className="card-muted rounded-2xl p-5 space-y-4">
                   <h3 className="text-sm font-bold text-slate-800 border-b border-slate-200 pb-2">Your Guardrails</h3>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1">Target Role</label>
-                      <input type="text" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. SDE, Intern" className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1">Min. Comp/Stipend</label>
-                      <input type="text" value={compensation} onChange={e => setCompensation(e.target.value)} placeholder="e.g. ₹50k/mo" className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1">Max Duration / Bond</label>
-                      <select value={duration} onChange={e => setDuration(e.target.value)} className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600">
-                        <option>&lt; 6 Months</option>
-                        <option>1 Year</option>
-                        <option>2 Years</option>
-                        <option>No Limit</option>
-                      </select>
-                    </div>
-                    <div className="flex items-center justify-between px-2 pt-5">
-                      <label className="text-xs font-semibold text-slate-600">Need Side Projects?</label>
-                      <input type="checkbox" checked={sideProjects} onChange={e => setSideProjects(e.target.checked)} className="w-4 h-4 rounded text-teal-600"/>
-                    </div>
+                    {activeFields.map(field => {
+                      const value = dynamicReqs[field.key] !== undefined ? dynamicReqs[field.key] : (field.type === 'select' ? field.options?.[0] : (field.type === 'checkbox' ? false : ''));
+
+                      if (field.type === 'text') {
+                        return (
+                          <div key={field.key}>
+                            <label className="block text-xs font-semibold text-slate-600 mb-1">{field.label}</label>
+                            <input type="text" value={value || ''} onChange={e => setDynamicReqs(prev => ({...prev, [field.key]: e.target.value}))} placeholder={field.placeholder} className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600"/>
+                          </div>
+                        );
+                      } else if (field.type === 'select') {
+                        return (
+                          <div key={field.key}>
+                            <label className="block text-xs font-semibold text-slate-600 mb-1">{field.label}</label>
+                            <select value={value || ''} onChange={e => setDynamicReqs(prev => ({...prev, [field.key]: e.target.value}))} className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-teal-600">
+                              {field.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                            </select>
+                          </div>
+                        );
+                      } else if (field.type === 'checkbox') {
+                        return (
+                          <div key={field.key} className="flex items-center justify-between px-2 pt-5">
+                            <label className="text-xs font-semibold text-slate-600">{field.label}</label>
+                            <input type="checkbox" checked={!!value} onChange={e => setDynamicReqs(prev => ({...prev, [field.key]: e.target.checked}))} className="w-4 h-4 rounded text-teal-600"/>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })}
                   </div>
 
                   <div>
