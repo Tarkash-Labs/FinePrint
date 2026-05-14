@@ -133,38 +133,3 @@ Conversation so far:
 
 User question: {question}
 """.strip()
-
-FINAL_ENRICHMENT_PROMPT = """
-You are a legal expert helping a non-lawyer understand a contract and negotiate better terms.
-Return ONLY valid JSON with exactly these fields:
-{{
-  "tldr": "<exactly 3 sentences>",
-  "negotiation_email": "<professional email>",
-  "explanations": [
-    {{"index": 1, "plain_english_explanation": "<2-4 sentences>"}}
-  ]
-}}
-
-Rules:
-1. Return ONLY valid JSON. No preamble. No markdown.
-2. If explanation_targets is empty, return an empty explanations array.
-3. Each explanations entry must include the same index from explanation_targets.
-4. negotiation_email must start with "Dear {company_name}," (or "Dear Hiring Manager," if company_name is empty).
-5. negotiation_email must end with "{user_name}" (or "[Your Name]" if user_name is empty).
-
-Contract type: {contract_label}
-Risk score: {risk_score}
-Verdict: {verdict}
-User requirements: {requirements}
-Company name: {company_name}
-User name: {user_name}
-
-Red flags (context):
-{red_flags_json}
-
-Safe clauses (context):
-{safe_clauses_json}
-
-Explanation targets (rewrite these only):
-{explanation_targets_json}
-""".strip()

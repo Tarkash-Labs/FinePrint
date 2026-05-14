@@ -1,18 +1,20 @@
 import base64
 import binascii
 import json
+import logging
 import os
 import re
 import uuid
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Any, Iterator, List, Optional, Literal
+from typing import Any, AsyncIterator, List, Optional, Literal
 
 from config import settings
 from gemma_client import GemmaClient, GemmaClientError
@@ -30,6 +32,30 @@ from prompts import (
 )
 from utils import extract_json_object, clamp_text, chunk_text
 
+logger = logging.getLogger(__name__)
+
+APP_START_TIME = time.monotonic()
+EXPLANATION_MIN_CHARS = 40
+ASK_CLAUSE_RATE_LIMIT = 20
+ASK_CLAUSE_WINDOW_SECONDS = 60 * 5
+ASK_CLAUSE_BUCKETS: dict[str, list[float]] = {}
+
+def is_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    times = ASK_CLAUSE_BUCKETS.get(ip, [])
+    times = [t for t in times if now - t < ASK_CLAUSE_WINDOW_SECONDS]
+    if len(times) >= ASK_CLAUSE_RATE_LIMIT:
+        ASK_CLAUSE_BUCKETS[ip] = times
+        return True
+    times.append(now)
+    ASK_CLAUSE_BUCKETS[ip] = times
+    return False
+
+def get_client_ip(request: Request) -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
+
 app = FastAPI(title="FinePrint API", description="Analyzing contracts with Gemma 4")
 
 SUPPORTED_MIME_TYPES = {
@@ -44,7 +70,24 @@ CONTRACT_LABELS = CONTRACT_TYPE_LABELS
 
 REPORT_TTL_SECONDS = 60 * 60 * 24 * 7
 REPORT_MAX_ITEMS = 200
-REPORT_STORE: "OrderedDict[str, dict]" = OrderedDict()
+
+STORE_PATH = Path("report_store.json")
+
+def _load_store() -> OrderedDict:
+    if STORE_PATH.exists():
+        try:
+            return OrderedDict(json.loads(STORE_PATH.read_text()))
+        except Exception:
+            pass
+    return OrderedDict()
+
+def _save_store() -> None:
+    try:
+        STORE_PATH.write_text(json.dumps(dict(REPORT_STORE)))
+    except Exception:
+        pass
+
+REPORT_STORE: OrderedDict = _load_store()
 
 def store_report(report: dict) -> str:
     report_id = uuid.uuid4().hex
@@ -59,6 +102,7 @@ def store_report(report: dict) -> str:
         "payload": payload,
     }
     _prune_reports()
+    _save_store()
     return report_id
 
 def _prune_reports() -> None:
@@ -68,6 +112,16 @@ def _prune_reports() -> None:
         REPORT_STORE.pop(key, None)
     while len(REPORT_STORE) > REPORT_MAX_ITEMS:
         REPORT_STORE.popitem(last=False)
+
+def _call_with_retry(fn, retries: int = 2, delay: float = 2.0):
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except GemmaClientError as exc:
+            if "429" in str(exc) and attempt < retries:
+                time.sleep(delay * (attempt + 1))
+                continue
+            raise
 
 gemma_client = GemmaClient(api_key=settings.api_key)
 
@@ -147,6 +201,7 @@ def parse_analysis_payload(
                     "clause_text": normalize_text(entry.get("clause_text") or entry.get("clause")),
                     "plain_english_explanation": normalize_text(entry.get("plain_english_explanation") or entry.get("explanation")),
                     "negotiation_tip": normalize_text(entry.get("negotiation_tip") or "Consult a legal professional regarding this clause."),
+                    "suggested_rewrite": normalize_text(entry.get("suggested_rewrite")),
                     "severity": normalize_severity(entry.get("severity")),
                 })
 
@@ -170,11 +225,11 @@ def summarize_contract_text(text: str) -> str:
     total = len(chunks)
     for index, chunk in enumerate(chunks, start=1):
         summary_prompt = f"{SUMMARY_CHUNK_PROMPT}\n\nChunk {index}/{total}:\n{chunk}"
-        summary_text = gemma_client.generate_content(model=settings.moe_model, contents=summary_prompt, temperature=0.2)
+        summary_text = _call_with_retry(lambda: gemma_client.generate_content(model=settings.moe_model, contents=summary_prompt, temperature=0.2))
         summaries.append(summary_text.strip())
 
     combined = "\n\n".join(summaries)
-    return gemma_client.generate_content(model=settings.moe_model, contents=f"{SUMMARY_COMBINE_PROMPT}\n\n{combined}", temperature=0.2)
+    return _call_with_retry(lambda: gemma_client.generate_content(model=settings.moe_model, contents=f"{SUMMARY_COMBINE_PROMPT}\n\n{combined}", temperature=0.2))
 
 def maybe_summarize_contract_text(text: str) -> str:
     if len(text) <= settings.summary_trigger_chars: return text
@@ -203,7 +258,7 @@ async def read_contract_text(file: UploadFile | None, text: str | None, base64_i
     from google.genai import types
     ocr_contents = [types.Part.from_bytes(data=contents, mime_type=content_type), OCR_PROMPT]
     try:
-        extracted_text = gemma_client.generate_content(model=settings.e4b_model, contents=ocr_contents, temperature=0.0)
+        extracted_text = _call_with_retry(lambda: gemma_client.generate_content(model=settings.e4b_model, contents=ocr_contents, temperature=0.0))
     except GemmaClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -214,13 +269,13 @@ def run_moe_analysis(contract_text: str, contract_type: str, requirements: str |
     analysis_prompt = get_contract_prompt(contract_type, requirements)
 
     def generate_response(use_mime: bool, inline_prompt: bool) -> str:
-        return gemma_client.generate_content(
+        return _call_with_retry(lambda: gemma_client.generate_content(
             model=settings.moe_model,
             contents=analysis_contents if not inline_prompt else f"{analysis_prompt}\n\n{analysis_contents}",
             system_instruction=None if inline_prompt else analysis_prompt,
             temperature=0.2,
             response_mime_type="application/json" if use_mime else None,
-        )
+        ))
 
     try:
         analysis_text = generate_response(use_mime=True, inline_prompt=False)
@@ -291,7 +346,13 @@ def generate_tldr_summary(
 def sse_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_allow_origins),
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class RequirementMatch(BaseModel):
     requirement: str
@@ -303,6 +364,7 @@ class FlaggedClause(BaseModel):
     clause_text: str
     plain_english_explanation: str
     negotiation_tip: str
+    suggested_rewrite: Optional[str] = None
     severity: str
 
 class SafeClause(BaseModel):
@@ -334,7 +396,6 @@ class AskClauseRequest(BaseModel):
 class AskClauseResponse(BaseModel):
     answer: str
 
-# A robust, keyword-based fallback if the Gemma API crashes during the demo
 def build_fallback_analysis(text: str, requirements: str | None = None) -> tuple:
     flags = []
     lower_text = text.lower()
@@ -345,6 +406,7 @@ def build_fallback_analysis(text: str, requirements: str | None = None) -> tuple
             "clause_text": "Clause containing financial penalties for early exit.",
             "plain_english_explanation": "The contract forces you to pay a penalty if you resign early.",
             "negotiation_tip": "Refuse any financial penalty for leaving the company. Training is a cost of business.",
+            "suggested_rewrite": "Employment shall be at-will with no financial penalties for resignation.",
             "severity": "high"
         })
     if "overtime" in lower_text or "weekend" in lower_text or "hours" in lower_text:
@@ -353,6 +415,7 @@ def build_fallback_analysis(text: str, requirements: str | None = None) -> tuple
             "clause_text": "Clause mentioning weekends, overtime, or extended availability.",
             "plain_english_explanation": "You may be forced to work weekends or after-hours without extra pay.",
             "negotiation_tip": "Ask for strict working hours to be defined and a Right to Disconnect.",
+            "suggested_rewrite": "Standard working hours are strictly 10 AM to 7 PM. Any required overtime shall be compensated.",
             "severity": "medium"
         })
     
@@ -382,7 +445,7 @@ async def analyze_contract_stream(
     except HTTPException as exc:
         return StreamingResponse(iter([sse_event("error", {"detail": str(exc.detail)})]), media_type="text/event-stream")
 
-    def event_stream() -> Iterator[str]:
+    async def event_stream() -> AsyncIterator[str]:
         try:
             yield sse_event("status", {"stage": "extract", "message": "Text extracted. Starting analysis..."})
             working_text = maybe_summarize_contract_text(contract_text)
@@ -397,17 +460,15 @@ async def analyze_contract_stream(
             yield sse_event("compatibility_score", {"compatibility_score": compatibility_score})
             yield sse_event("verdict", {"verdict": verdict, "verdict_reason": verdict_reason})
 
-            # FIX: Adding a breather for rate limit and injecting the specific error to the UI
             try:
-                time.sleep(1) # Prevent 429 Resource Exhausted
-                summary_text = generate_tldr_summary(
+                summary_text = _call_with_retry(lambda: generate_tldr_summary(
                     contract_type,
                     risk_score,
                     verdict,
                     red_flags,
                     safe_clauses,
                     requirements,
-                )
+                ))
             except Exception as exc:
                 summary_text = f"Summary unavailable: {str(exc)}"
             yield sse_event("summary", {"summary": summary_text})
@@ -425,8 +486,7 @@ async def analyze_contract_stream(
                 
                 explanation = flag.get("plain_english_explanation", "")
                 try:
-                    time.sleep(0.5) # Prevent 429 Resource Exhausted
-                    explanation = explain_red_flag(contract_type, flag)
+                    explanation = _call_with_retry(lambda: explain_red_flag(contract_type, flag))
                 except Exception:
                     pass
 
@@ -435,6 +495,7 @@ async def analyze_contract_stream(
                     "clause_text": flag.get("clause_text"),
                     "plain_english_explanation": explanation,
                     "negotiation_tip": flag.get("negotiation_tip"),
+                    "suggested_rewrite": flag.get("suggested_rewrite"),
                     "severity": flag.get("severity"),
                 })
                 final_flags.append({
@@ -442,14 +503,14 @@ async def analyze_contract_stream(
                     "clause_text": flag.get("clause_text"),
                     "plain_english_explanation": explanation,
                     "negotiation_tip": flag.get("negotiation_tip"),
+                    "suggested_rewrite": flag.get("suggested_rewrite"),
                     "severity": flag.get("severity"),
                 })
 
             yield sse_event("status", {"stage": "email", "message": "Drafting negotiation email... (Gemma Dense)"})
             email_text = ""
             try:
-                time.sleep(1) # Prevent 429 Resource Exhausted
-                email_text = generate_negotiation_email(red_flags, company_name or "", user_name or "")
+                email_text = _call_with_retry(lambda: generate_negotiation_email(red_flags, company_name or "", user_name or ""))
             except Exception:
                 email_text = "Dear Hiring Manager,\n\nPlease review the clauses regarding bonds and overtime as we discussed.\n\nBest,\n[Your Name]"
                 
@@ -486,9 +547,13 @@ def get_report(report_id: str):
     return record["payload"]
 
 @app.post("/ask-clause", response_model=AskClauseResponse)
-def ask_clause(payload: AskClauseRequest):
+def ask_clause(payload: AskClauseRequest, request: Request):
     if not settings.api_key:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Missing API Key")
+
+    client_ip = get_client_ip(request)
+    if is_rate_limited(client_ip):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded. Please try again soon.")
 
     if payload.contract_type not in CONTRACT_TYPE_LABELS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported contract type")
@@ -510,11 +575,11 @@ def ask_clause(payload: AskClauseRequest):
         question=payload.question.strip(),
     )
 
-    answer = gemma_client.generate_content(
+    answer = _call_with_retry(lambda: gemma_client.generate_content(
         model=settings.dense_model,
         contents=prompt,
         temperature=0.2,
-    ).strip()
+    )).strip()
 
     return AskClauseResponse(answer=answer)
 
