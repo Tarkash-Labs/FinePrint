@@ -585,11 +585,12 @@ async def compare_contracts(
     task2 = run_moe_analysis(text2, contract_type, requirements)
     
     res1, res2 = await asyncio.gather(task1, task2)
-    
-    # Extract red_flags (index 4 from parse_analysis_payload)
-    flags_v1 = res1[4] 
-    flags_v2 = res2[4] 
-    
+
+    # Unpack both results — tuple from parse_analysis_payload + moe_ms at index -1
+    # Indices: 0=risk, 1=compat, 2=verdict, 3=verdict_reason, 4=red_flags, 5=safe_clauses, 6=req_breakdown, 7=moe_ms
+    risk_v1, compat_v1, verdict_v1, reason_v1, flags_v1, safe_v1, reqs_v1, _ = res1
+    risk_v2, compat_v2, verdict_v2, reason_v2, flags_v2, safe_v2, reqs_v2, _ = res2
+
     prompt = COMPARE_PROMPT.format(
         v1_flags=json.dumps([f.get("clause_title") for f in flags_v1]),
         v2_flags=json.dumps([f.get("clause_title") for f in flags_v2])
@@ -605,7 +606,31 @@ async def compare_contracts(
         )
     )
     
-    return extract_json_object(response_text)
+    compare_summary = extract_json_object(response_text)
+
+    # Attach the full individual analysis results so the frontend can compute
+    # risk_delta, score_before, score_after, and the severity heatmap
+    # without any extra API calls.
+    result_v1 = {
+        "risk_score": risk_v1,
+        "compatibility_score": compat_v1,
+        "verdict": verdict_v1,
+        "verdict_reason": reason_v1,
+        "red_flags": flags_v1,
+        "safe_clauses": safe_v1,
+        "requirement_breakdown": reqs_v1,
+    }
+    result_v2 = {
+        "risk_score": risk_v2,
+        "compatibility_score": compat_v2,
+        "verdict": verdict_v2,
+        "verdict_reason": reason_v2,
+        "red_flags": flags_v2,
+        "safe_clauses": safe_v2,
+        "requirement_breakdown": reqs_v2,
+    }
+
+    return {**compare_summary, "result_v1": result_v1, "result_v2": result_v2}
 
 if __name__ == "__main__":
     import uvicorn

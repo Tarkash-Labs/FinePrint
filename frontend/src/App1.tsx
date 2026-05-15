@@ -1372,55 +1372,16 @@ function App() {
                 <p className="report-reason">
                   {result.verdict_reason || (isAnalyzing ? 'Computing verdict...' : 'Verdict pending.')}
                 </p>
-                {/* Requirements checklist — moved from the old Compatibility card */}
-                {result.requirement_breakdown.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
-                    <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Your Requirements</div>
-                    {result.requirement_breakdown.map((req, i) => (
-                      <div key={i} className="flex items-start gap-2 text-sm">
-                        {req.met
-                          ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" />
-                          : <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
-                        <span className={req.met ? 'text-slate-700' : 'text-red-700 font-medium'}>{req.requirement}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
                 <div className="report-meta">
                   <span className="pill">Contract: {CONTRACT_TYPES.find(c => c.id === contractType)?.label || 'General Contract'}</span>
                   <span className="pill">Share-ready report</span>
                 </div>
               </div>
               <div className="report-hero-scores">
-                <div className="score-block" style={{
-                  borderRadius: '12px',
-                  padding: '14px',
-                  background: result.risk_score === null
-                    ? 'transparent'
-                    : result.risk_score <= 30
-                      ? 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)'
-                      : result.risk_score <= 60
-                        ? 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)'
-                        : 'linear-gradient(135deg, #fff1f2 0%, #ffe4e6 100%)',
-                  border: result.risk_score === null ? 'none'
-                    : result.risk_score <= 30 ? '1px solid #bbf7d0'
-                    : result.risk_score <= 60 ? '1px solid #fde68a'
-                    : '1px solid #fecdd3',
-                  transition: 'background 0.4s ease, border 0.4s ease',
-                }}>
-                  <div className="score-label" style={{
-                    color: result.risk_score === null ? undefined
-                      : result.risk_score <= 30 ? '#15803d'
-                      : result.risk_score <= 60 ? '#b45309'
-                      : '#be123c',
-                  }}>Risk score</div>
+                <div className="score-block">
+                  <div className="score-label">Risk score</div>
                   <div className="score-row">
-                    <span className="score-value" style={{
-                      color: result.risk_score === null ? undefined
-                        : result.risk_score <= 30 ? '#16a34a'
-                        : result.risk_score <= 60 ? '#d97706'
-                        : '#e11d48',
-                    }}>{result.risk_score !== null ? result.risk_score : '--'}</span>
+                    <span className="score-value">{result.risk_score !== null ? result.risk_score : '--'}</span>
                     <span className="score-unit">/ 100</span>
                   </div>
                   <div className="score-bar">
@@ -1429,41 +1390,81 @@ function App() {
                   <div className="score-foot">{riskMeta.description}</div>
                   {benchmarkNote && <div className="score-note">{benchmarkNote}</div>}
                 </div>
-                <div className="score-block" style={{
-                  borderRadius: '12px',
-                  padding: '14px',
-                  background: result.compatibility_score === null
-                    ? 'transparent'
-                    : result.compatibility_score >= 70
-                      ? 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)'
-                      : result.compatibility_score >= 40
-                        ? 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)'
-                        : 'linear-gradient(135deg, #fff1f2 0%, #ffe4e6 100%)',
-                  border: result.compatibility_score === null ? 'none'
-                    : result.compatibility_score >= 70 ? '1px solid #bbf7d0'
-                    : result.compatibility_score >= 40 ? '1px solid #fde68a'
-                    : '1px solid #fecdd3',
-                  transition: 'background 0.4s ease, border 0.4s ease',
-                }}>
-                  <div className="score-label" style={{
-                    color: result.compatibility_score === null ? undefined
-                      : result.compatibility_score >= 70 ? '#15803d'
-                      : result.compatibility_score >= 40 ? '#b45309'
-                      : '#be123c',
-                  }}>Compatibility</div>
+                <div className="score-block">
+                  <div className="score-label">Compatibility</div>
                   <div className="score-row">
-                    <span className="score-value" style={{
-                      color: result.compatibility_score === null ? undefined
-                        : result.compatibility_score >= 70 ? '#16a34a'
-                        : result.compatibility_score >= 40 ? '#d97706'
-                        : '#e11d48',
-                    }}>{result.compatibility_score !== null ? result.compatibility_score : '--'}</span>
+                    <span className="score-value">{result.compatibility_score !== null ? result.compatibility_score : '--'}</span>
                     <span className="score-unit">/ 100</span>
                   </div>
                   <div className="score-bar">
                     <span style={{ width: `${compatibilityPercent}%` }} />
                   </div>
                   <div className="score-foot">{compatibilityMeta.description}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="report-grid screen-only reveal">
+              {/* Risk Score */}
+              <div className="card flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Risk Score</h3>
+                    <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[riskMeta.tone].badge}`}>{riskMeta.label}</span>
+                  </div>
+                  <div className="mt-4 flex items-baseline gap-2">
+                    <span className={`text-5xl font-extrabold ${SCORE_TONE_STYLES[riskMeta.tone].text}`}>
+                      {result.risk_score !== null ? result.risk_score : '--'}
+                    </span>
+                    <span className="text-sm text-slate-500">/ 100</span>
+                  </div>
+                </div>
+                <div>
+                  <p className="mt-4 text-sm text-slate-600">{riskMeta.description}</p>
+                  {benchmarkNote && (
+                    <p className="mt-1 text-[11px] text-slate-400 font-medium">
+                      {benchmarkNote}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Compatibility Score & Checklist */}
+              <div className="card flex flex-col">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Compatibility</h3>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[compatibilityMeta.tone].badge}`}>{compatibilityMeta.label}</span>
+                </div>
+                <div className="mt-4 flex items-baseline gap-2">
+                  <span className={`text-5xl font-extrabold ${SCORE_TONE_STYLES[compatibilityMeta.tone].text}`}>
+                    {result.compatibility_score !== null ? result.compatibility_score : '--'}
+                  </span>
+                  <span className="text-sm text-slate-500">/ 100</span>
+                </div>
+                <div className="mt-4 space-y-2 flex-grow border-t pt-3">
+                  {result.requirement_breakdown.length > 0 ? (
+                    result.requirement_breakdown.map((req, i) => (
+                      <div key={i} className="flex items-start gap-2 text-sm">
+                        {req.met ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" /> : <XCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
+                        <span className={req.met ? "text-slate-700" : "text-red-700 font-medium"}>{req.requirement}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-slate-400 italic">No specific requirements analyzed.</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Verdict */}
+              <div className="card flex flex-col">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Final Verdict</h3>
+                  {verdictMeta && <span className={`text-xs font-semibold px-2 py-1 rounded-full ${SCORE_TONE_STYLES[verdictMeta.tone].badge}`}>{verdictMeta.label}</span>}
+                </div>
+                <div className="mt-4 flex-grow">
+                  <p className="text-sm font-semibold text-slate-900 leading-relaxed text-lg">
+                    {result.verdict_reason || (isAnalyzing ? "Computing verdict..." : "")}
+                  </p>
                 </div>
               </div>
             </div>
