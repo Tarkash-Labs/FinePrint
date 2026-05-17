@@ -60,7 +60,12 @@ type FlaggedClause = { clause_title: string; clause_text: string; plain_english_
 type SafeClause = { clause_title: string; plain_english_explanation: string; };
 type ChatMessage = { role: 'user' | 'assistant'; content: string; };
 type ClauseChatState = { messages: ChatMessage[]; input: string; isLoading: boolean; error?: string | null; };
-type Timing = { e4b_ms?: number; moe_ms?: number; dense_ms?: number; };
+type Timing = {
+  e4b_ms?: number;
+  moe_ms?: number;
+  dense_explain_ms?: number;
+  dense_email_ms?: number;
+};
 
 type AnalyzeResult = {
   risk_score: number | null;
@@ -75,6 +80,12 @@ type AnalyzeResult = {
   timing?: Timing | null;
 };
 
+type CompareVersionSnapshot = {
+  red_flags: FlaggedClause[];
+};
+
+type CompareFlagColumn = 'resolved' | 'new' | 'remaining';
+
 // NEW: Type for the Comparison Endpoint
 type CompareResult = {
   summary: string;
@@ -87,6 +98,8 @@ type CompareResult = {
   score_after?: number | null;
   severity_before?: Record<string, number> | null;
   severity_after?: Record<string, number> | null;
+  result_v1?: CompareVersionSnapshot | null;
+  result_v2?: CompareVersionSnapshot | null;
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -109,6 +122,226 @@ const RISK_BENCHMARKS: Record<string, { min: number; max: number }> = {
 };
 
 const formatMs = (value?: number) => (typeof value === 'number' ? `${(value / 1000).toFixed(1)}s` : '--');
+
+const SEVERITY_CHIP: Record<Severity, string> = {
+  high: 'bg-red-100 text-red-700',
+  medium: 'bg-amber-100 text-amber-700',
+  low: 'bg-sky-100 text-sky-700',
+};
+
+const normalizeClauseTitle = (title: string) => title.trim().toLowerCase();
+
+const findFlagByTitle = (flags: FlaggedClause[], title: string): FlaggedClause | undefined => {
+  const norm = normalizeClauseTitle(title);
+  const exact = flags.find(f => normalizeClauseTitle(f.clause_title) === norm);
+  if (exact) return exact;
+  return flags.find(f => {
+    const ft = normalizeClauseTitle(f.clause_title);
+    return ft.includes(norm) || norm.includes(ft);
+  });
+};
+
+const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2 };
+
+const truncateExplanation = (text: string, max = 220) => {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max).trimEnd()}…`;
+};
+
+type CompareFlagDelta = {
+  changeHeadline: string;
+  changeTone: 'positive' | 'negative' | 'neutral';
+  severityV1?: Severity;
+  severityV2?: Severity;
+  beforeLabel: string;
+  beforeText?: string;
+  afterLabel: string;
+  afterText?: string;
+  canExpand: boolean;
+};
+
+const buildCompareFlagDelta = (
+  title: string,
+  column: CompareFlagColumn,
+  flagsV1: FlaggedClause[],
+  flagsV2: FlaggedClause[],
+): CompareFlagDelta => {
+  const v1 = findFlagByTitle(flagsV1, title);
+  const v2 = findFlagByTitle(flagsV2, title);
+  const issueV1 = v1?.plain_english_explanation?.trim();
+  const issueV2 = v2?.plain_english_explanation?.trim();
+
+  if (column === 'resolved') {
+    if (v2 && v1?.severity && v2.severity && SEVERITY_RANK[v2.severity] < SEVERITY_RANK[v1.severity]) {
+      return {
+        changeHeadline: `Improved in revision — severity dropped from ${v1.severity} to ${v2.severity}`,
+        changeTone: 'positive',
+        severityV1: v1.severity,
+        severityV2: v2.severity,
+        beforeLabel: 'What was wrong (original)',
+        beforeText: issueV1,
+        afterLabel: 'What changed (revised)',
+        afterText: issueV2 || 'Still listed but at a lower risk level than before.',
+        canExpand: true,
+      };
+    }
+    return {
+      changeHeadline: 'Fixed in the revised contract — no longer flagged as a red flag',
+      changeTone: 'positive',
+      severityV1: v1?.severity,
+      severityV2: undefined,
+      beforeLabel: 'What was wrong (original)',
+      beforeText: issueV1 || 'This clause was risky in the original version.',
+      afterLabel: 'What changed (revised)',
+      afterText: issueV2
+        ? `Still mentioned, but the model rates it lower risk now: ${truncateExplanation(issueV2, 180)}`
+        : 'This issue no longer appears in the revised analysis — the problematic language was likely removed or rewritten.',
+      canExpand: true,
+    };
+  }
+
+  if (column === 'new') {
+    return {
+      changeHeadline: 'New risk introduced in the revised contract',
+      changeTone: 'negative',
+      severityV1: v1?.severity,
+      severityV2: v2?.severity,
+      beforeLabel: 'Before (original)',
+      beforeText: issueV1
+        ? truncateExplanation(issueV1)
+        : 'This was not flagged as a problem in the original contract.',
+      afterLabel: 'After (revised) — why it matters',
+      afterText: issueV2 || 'Flagged as a new concern in the revised version.',
+      canExpand: true,
+    };
+  }
+
+  const sev1 = v1?.severity;
+  const sev2 = v2?.severity;
+  let changeHeadline = 'Still flagged in both versions — not fully fixed yet';
+  let changeTone: CompareFlagDelta['changeTone'] = 'neutral';
+
+  if (sev1 && sev2) {
+    const delta = SEVERITY_RANK[sev2] - SEVERITY_RANK[sev1];
+    if (delta > 0) {
+      changeHeadline = `Got worse in revision — severity increased from ${sev1} to ${sev2}`;
+      changeTone = 'negative';
+    } else if (delta < 0) {
+      changeHeadline = `Partially improved — still flagged, but severity dropped from ${sev1} to ${sev2}`;
+      changeTone = 'positive';
+    } else {
+      changeHeadline = `Unchanged in revision — still ${sev1} severity, needs negotiation`;
+      changeTone = 'neutral';
+    }
+  }
+
+  return {
+    changeHeadline,
+    changeTone,
+    severityV1: sev1,
+    severityV2: sev2,
+    beforeLabel: 'Original version',
+    beforeText: issueV1 || 'Flagged in the original contract.',
+    afterLabel: 'Revised version (still a problem)',
+    afterText: issueV2 || issueV1 || 'Still present in the revised contract.',
+    canExpand: true,
+  };
+};
+
+const DELTA_TONE_STYLES = {
+  positive: 'text-emerald-800 bg-emerald-50 border-emerald-100',
+  negative: 'text-red-800 bg-red-50 border-red-100',
+  neutral: 'text-amber-800 bg-amber-50 border-amber-100',
+} as const;
+
+function CompareFlagItem({
+  title,
+  column,
+  flagsV1,
+  flagsV2,
+  panelClass,
+  isExpanded,
+  onToggle,
+}: {
+  title: string;
+  column: CompareFlagColumn;
+  flagsV1: FlaggedClause[];
+  flagsV2: FlaggedClause[];
+  panelClass: string;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  const delta = buildCompareFlagDelta(title, column, flagsV1, flagsV2);
+
+  return (
+    <li className={`text-sm rounded-md border overflow-hidden ${panelClass}`}>
+      <button
+        type="button"
+        onClick={delta.canExpand ? onToggle : undefined}
+        disabled={!delta.canExpand}
+        className={`w-full text-left px-3 py-2 flex items-start justify-between gap-2 ${delta.canExpand ? 'cursor-pointer hover:bg-white/60' : 'cursor-default'}`}
+      >
+        <div className="flex-grow min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-slate-800">{title}</span>
+            {column === 'resolved' ? (
+              delta.severityV2 && delta.severityV1 ? (
+                <>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${SEVERITY_CHIP[delta.severityV1]}`}>{delta.severityV1}</span>
+                  <span className="text-[10px] text-slate-400">→</span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${SEVERITY_CHIP[delta.severityV2]}`}>{delta.severityV2}</span>
+                </>
+              ) : (
+                <>
+                  {delta.severityV1 && (
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${SEVERITY_CHIP[delta.severityV1]}`}>{delta.severityV1}</span>
+                  )}
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded uppercase bg-emerald-100 text-emerald-700">fixed</span>
+                </>
+              )
+            ) : (
+              <>
+                {delta.severityV1 && (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${SEVERITY_CHIP[delta.severityV1]}`}>{delta.severityV1}</span>
+                )}
+                {delta.severityV2 && (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${SEVERITY_CHIP[delta.severityV2]}`}>
+                    {column === 'remaining' && delta.severityV1 ? `→ ${delta.severityV2}` : delta.severityV2}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+        {delta.canExpand && (
+          isExpanded
+            ? <ChevronUp className="w-4 h-4 shrink-0 text-slate-400 mt-0.5" />
+            : <ChevronDown className="w-4 h-4 shrink-0 text-slate-400 mt-0.5" />
+        )}
+      </button>
+      {isExpanded && delta.canExpand && (
+        <div className="px-3 pb-3 pt-2 space-y-3 border-t border-inherit bg-white/50">
+          <p className={`text-[11px] font-semibold leading-snug px-2 py-1.5 rounded-md border ${DELTA_TONE_STYLES[delta.changeTone]}`}>
+            {delta.changeHeadline}
+          </p>
+          {delta.beforeText && (
+            <div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{delta.beforeLabel}</span>
+              <p className="mt-1 text-xs text-slate-600 leading-relaxed">{truncateExplanation(delta.beforeText)}</p>
+            </div>
+          )}
+          {delta.afterText && (
+            <div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{delta.afterLabel}</span>
+              <p className="mt-1 text-xs text-slate-600 leading-relaxed">{truncateExplanation(delta.afterText)}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
 
 const getBenchmarkNote = (score: number | null, contractId: string) => {
   if (score === null) return null;
@@ -180,6 +413,7 @@ function App() {
   const [contractTextV2, setContractTextV2] = useState('');
   const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
   const [isComparing, setIsComparing] = useState(false);
+  const [expandedCompareFlags, setExpandedCompareFlags] = useState<string[]>([]);
 
   // Dynamic Form State
   const [dynamicReqs, setDynamicReqs] = useState<Record<string, any>>({
@@ -494,6 +728,7 @@ function App() {
     setIsComparing(true);
     setError(null);
     setCompareResult(null);
+    setExpandedCompareFlags([]);
     setResult(null); // Clear standard result
 
     const formData = new FormData();
@@ -1219,35 +1454,86 @@ function App() {
 
             <div className="grid gap-4 md:grid-cols-3 items-start">
               <div className="card border-l-4 border-l-green-500">
-                <h4 className="text-sm font-bold text-green-800 mb-4 flex items-center gap-2">
+                <h4 className="text-sm font-bold text-green-800 mb-1 flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4" /> Resolved Flags
                 </h4>
+                <p className="text-[10px] text-slate-400 mb-3">Click to see what changed vs the original</p>
                 <ul className="space-y-2">
-                  {compareResult.resolved_flags.length > 0 ? compareResult.resolved_flags.map((f, i) => (
-                    <li key={i} className="text-sm text-slate-700 bg-green-50 px-3 py-2 rounded-md border border-green-100">{f}</li>
-                  )) : <li className="text-sm text-slate-400 italic">No flags were resolved in this revision.</li>}
+                  {compareResult.resolved_flags.length > 0 ? compareResult.resolved_flags.map((title, i) => {
+                    const flagsV1 = compareResult.result_v1?.red_flags ?? [];
+                    const flagsV2 = compareResult.result_v2?.red_flags ?? [];
+                    const key = `resolved-${i}`;
+                    return (
+                      <CompareFlagItem
+                        key={key}
+                        title={title}
+                        column="resolved"
+                        flagsV1={flagsV1}
+                        flagsV2={flagsV2}
+                        panelClass="text-slate-700 bg-green-50 border-green-100"
+                        isExpanded={expandedCompareFlags.includes(key)}
+                        onToggle={() => setExpandedCompareFlags(prev =>
+                          prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key],
+                        )}
+                      />
+                    );
+                  }) : <li className="text-sm text-slate-400 italic">No flags were resolved in this revision.</li>}
                 </ul>
               </div>
               
               <div className="card border-l-4 border-l-red-500">
-                <h4 className="text-sm font-bold text-red-800 mb-4 flex items-center gap-2">
+                <h4 className="text-sm font-bold text-red-800 mb-1 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4" /> New Risks Introduced
                 </h4>
+                <p className="text-[10px] text-slate-400 mb-3">Click to see what changed vs the original</p>
                 <ul className="space-y-2">
-                  {compareResult.new_flags.length > 0 ? compareResult.new_flags.map((f, i) => (
-                    <li key={i} className="text-sm text-slate-700 bg-red-50 px-3 py-2 rounded-md border border-red-100">{f}</li>
-                  )) : <li className="text-sm text-slate-400 italic">No new risky clauses detected.</li>}
+                  {compareResult.new_flags.length > 0 ? compareResult.new_flags.map((title, i) => {
+                    const flagsV1 = compareResult.result_v1?.red_flags ?? [];
+                    const flagsV2 = compareResult.result_v2?.red_flags ?? [];
+                    const key = `new-${i}`;
+                    return (
+                      <CompareFlagItem
+                        key={key}
+                        title={title}
+                        column="new"
+                        flagsV1={flagsV1}
+                        flagsV2={flagsV2}
+                        panelClass="text-slate-700 bg-red-50 border-red-100"
+                        isExpanded={expandedCompareFlags.includes(key)}
+                        onToggle={() => setExpandedCompareFlags(prev =>
+                          prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key],
+                        )}
+                      />
+                    );
+                  }) : <li className="text-sm text-slate-400 italic">No new risky clauses detected.</li>}
                 </ul>
               </div>
               
               <div className="card border-l-4 border-l-amber-500">
-                <h4 className="text-sm font-bold text-amber-800 mb-4 flex items-center gap-2">
+                <h4 className="text-sm font-bold text-amber-800 mb-1 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4" /> Remaining Flags
                 </h4>
+                <p className="text-[10px] text-slate-400 mb-3">Click to see what changed vs the original</p>
                 <ul className="space-y-2">
-                  {compareResult.remaining_flags.length > 0 ? compareResult.remaining_flags.map((f, i) => (
-                    <li key={i} className="text-sm text-slate-700 bg-amber-50 px-3 py-2 rounded-md border border-amber-100">{f}</li>
-                  )) : <li className="text-sm text-slate-400 italic">No flags remaining from the original.</li>}
+                  {compareResult.remaining_flags.length > 0 ? compareResult.remaining_flags.map((title, i) => {
+                    const flagsV1 = compareResult.result_v1?.red_flags ?? [];
+                    const flagsV2 = compareResult.result_v2?.red_flags ?? [];
+                    const key = `remaining-${i}`;
+                    return (
+                      <CompareFlagItem
+                        key={key}
+                        title={title}
+                        column="remaining"
+                        flagsV1={flagsV1}
+                        flagsV2={flagsV2}
+                        panelClass="text-slate-700 bg-amber-50 border-amber-100"
+                        isExpanded={expandedCompareFlags.includes(key)}
+                        onToggle={() => setExpandedCompareFlags(prev =>
+                          prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key],
+                        )}
+                      />
+                    );
+                  }) : <li className="text-sm text-slate-400 italic">No flags remaining from the original.</li>}
                 </ul>
               </div>
             </div>
@@ -1308,9 +1594,12 @@ function App() {
                 )}
                 {result?.timing && (
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
-                    <span className="rounded-full bg-slate-100 px-2 py-1">E4B: {formatMs(result.timing.e4b_ms)}</span>
+                    {(result.timing.e4b_ms ?? 0) > 0 && (
+                      <span className="rounded-full bg-slate-100 px-2 py-1">E4B: {formatMs(result.timing.e4b_ms)}</span>
+                    )}
                     <span className="rounded-full bg-slate-100 px-2 py-1">MoE: {formatMs(result.timing.moe_ms)}</span>
-                    <span className="rounded-full bg-slate-100 px-2 py-1">Dense: {formatMs(result.timing.dense_ms)}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Dense explain: {formatMs(result.timing.dense_explain_ms)}</span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1">Dense email: {formatMs(result.timing.dense_email_ms)}</span>
                   </div>
                 )}
               </div>
