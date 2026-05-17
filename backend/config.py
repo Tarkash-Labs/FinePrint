@@ -21,7 +21,6 @@ class Settings:
     summary_trigger_chars: int = int(os.getenv("SUMMARY_TRIGGER_CHARS", "20000"))
     summary_chunk_chars: int = int(os.getenv("SUMMARY_CHUNK_CHARS", "8000"))
     max_upload_bytes: int = int(os.getenv("MAX_UPLOAD_BYTES", "10485760")) # 10MB
-    report_db_path: str = os.getenv("REPORT_DB_PATH", "reports_db.json")
     cors_allow_origins: tuple[str, ...] = _parse_csv(os.getenv("CORS_ALLOW_ORIGINS", "*"))
     cors_allow_credentials: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
 

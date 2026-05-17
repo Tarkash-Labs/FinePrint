@@ -1,5 +1,11 @@
 import { useEffect, useState, useRef } from 'react';
 import { Upload, FileText, AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, CheckCircle2, XCircle, Copy, Download, Loader2, Building, User } from 'lucide-react';
+import {
+  buildShareUrl,
+  decodeShareReport,
+  readShareTokenFromLocation,
+  isLegacyServerReportLink,
+} from './shareReport';
 
 const CONTRACT_TYPES = [
   { id: 'employment', label: 'Employment Bond' },
@@ -445,28 +451,39 @@ function App() {
   const reportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const reportId = params.get('report');
-    if (!reportId) return;
+    const token = readShareTokenFromLocation();
+    if (!token) return;
+
+    if (isLegacyServerReportLink()) {
+      setIsLoadingReport(true);
+      setError(null);
+      fetch(`${API_BASE_URL}/report/${token}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error('This share link has expired or is unavailable on this server.');
+          return res.json() as Promise<{ contract_type: string; analysis: AnalyzeResult }>;
+        })
+        .then((payload) => {
+          setContractType(payload.contract_type || CONTRACT_TYPES[0].id);
+          setResult(payload.analysis);
+          setShareUrl(window.location.href);
+        })
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : 'Failed to load shared report.');
+        })
+        .finally(() => setIsLoadingReport(false));
+      return;
+    }
 
     setIsLoadingReport(true);
     setError(null);
-
-    fetch(`${API_BASE_URL}/report/${reportId}`)
-      .then(async (res) => {
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || `Request failed (${res.status})`);
-        }
-        return res.json() as Promise<{ contract_type: string; analysis: AnalyzeResult }>;
-      })
+    decodeShareReport(token)
       .then((payload) => {
         setContractType(payload.contract_type || CONTRACT_TYPES[0].id);
-        setResult(payload.analysis);
+        setResult(payload.analysis as AnalyzeResult);
         setShareUrl(window.location.href);
       })
       .catch((err) => {
-        setError(err instanceof Error ? err.message : 'Failed to load shared report.');
+        setError(err instanceof Error ? err.message : 'Invalid share link.');
       })
       .finally(() => setIsLoadingReport(false));
   }, []);
@@ -850,7 +867,17 @@ function App() {
             if (eventType === 'status') setStreamStatus(payload);
             else if (eventType === 'error') throw new Error(payload.detail);
             else if (eventType === 'done') {
-              setResult(prev => prev ? { ...prev, timing: payload.timing || prev.timing } : prev);
+              setResult(prev => {
+                const next = prev ? { ...prev, timing: payload.timing || prev.timing } : prev;
+                if (next) {
+                  buildShareUrl(contractType, next)
+                    .then(url => setShareUrl(url))
+                    .catch((err) => {
+                      console.warn('Share link not created:', err);
+                    });
+                }
+                return next;
+              });
               setIsAnalyzing(false);
               setStreamStatus({ stage: 'done', message: 'Analysis Complete' });
               setTimeout(() => setStreamStatus(null), 2000);
@@ -872,10 +899,6 @@ function App() {
                 if (eventType === 'negotiation_email') next.negotiation_email = payload.email;
                 return next;
               });
-            }
-            if (eventType === 'share_report') {
-              const base = `${window.location.origin}${window.location.pathname}`;
-              setShareUrl(`${base}?report=${payload.report_id}`);
             }
           }
         }
@@ -1623,6 +1646,7 @@ function App() {
             {shareUrl ? (
               <div className="card screen-only">
                 <div className="text-xs font-bold text-slate-500 uppercase tracking-wider">Shareable Report Link</div>
+                <p className="text-[10px] text-slate-400 mt-1">Stateless — the full report is encoded in this link. Works on Vercel/Netlify with no database.</p>
                 <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
                   <input
                     type="text"

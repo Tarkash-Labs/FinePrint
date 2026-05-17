@@ -2,13 +2,8 @@ import base64
 import binascii
 import json
 import logging
-import os
-import uuid
 import time
 import asyncio
-from collections import OrderedDict
-from datetime import datetime, timezone
-
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -56,53 +51,6 @@ SUPPORTED_MIME_TYPES = {
 }
 
 CONTRACT_LABELS = CONTRACT_TYPE_LABELS
-
-# --- Persistence Setup ---
-REPORT_TTL_SECONDS = 60 * 60 * 24 * 7
-REPORT_MAX_ITEMS = 200
-REPORT_STORE: "OrderedDict[str, dict]" = OrderedDict()
-
-def load_reports_from_disk():
-    if os.path.exists(settings.report_db_path):
-        try:
-            with open(settings.report_db_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for k, v in data.items():
-                    REPORT_STORE[k] = v
-        except Exception as e:
-            logger.error(f"Error loading reports: {e}")
-
-def save_reports_to_disk():
-    try:
-        with open(settings.report_db_path, "w", encoding="utf-8") as f:
-            json.dump(REPORT_STORE, f)
-    except Exception as e:
-        logger.error(f"Error saving reports: {e}")
-
-load_reports_from_disk()
-
-def store_report(report: dict) -> str:
-    report_id = uuid.uuid4().hex
-    created_at = datetime.now(timezone.utc)
-    payload = {
-        "report_id": report_id,
-        "created_at": created_at.isoformat(),
-        **report,
-    }
-    REPORT_STORE[report_id] = {
-        "created_at": created_at.timestamp(),
-        "payload": payload,
-    }
-    _prune_reports()
-    return report_id
-
-def _prune_reports() -> None:
-    now = datetime.now(timezone.utc).timestamp()
-    expired = [key for key, value in REPORT_STORE.items() if now - value["created_at"] > REPORT_TTL_SECONDS]
-    for key in expired:
-        REPORT_STORE.pop(key, None)
-    while len(REPORT_STORE) > REPORT_MAX_ITEMS:
-        REPORT_STORE.popitem(last=False)
 
 gemma_client = GemmaClient(api_key=settings.api_key)
 
@@ -430,7 +378,7 @@ def health_check():
             "classify": settings.moe_model,
             "explain": settings.dense_model
         },
-        "reports_cached": len(REPORT_STORE),
+        "share_reports": "stateless_url_hash",
         "uptime_s": time.monotonic() - APP_START_TIME
     }
 
@@ -495,23 +443,6 @@ async def analyze_contract_stream(
             yield sse_event("summary", {"summary": tldr})
             yield sse_event("negotiation_email", {"email": email_text})
 
-            report_id = store_report({
-                "contract_type": contract_type,
-                "analysis": {
-                    "risk_score": risk_score,
-                    "compatibility_score": compatibility_score,
-                    "verdict": verdict,
-                    "verdict_reason": verdict_reason,
-                    "summary": tldr,
-                    "requirement_breakdown": req_breakdown,
-                    "red_flags": final_flags,
-                    "safe_clauses": safe_clauses,
-                    "negotiation_email": email_text,
-                },
-            })
-            asyncio.create_task(asyncio.to_thread(save_reports_to_disk))
-            yield sse_event("share_report", {"report_id": report_id})
-
             yield sse_event("done", {"ok": True, "timing": timing_metrics})
         except Exception as exc:
             yield sse_event("error", {"detail": str(exc)})
@@ -520,11 +451,11 @@ async def analyze_contract_stream(
 
 @app.get("/report/{report_id}")
 def get_report(report_id: str):
-    _prune_reports()
-    record = REPORT_STORE.get(report_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Report not found or expired")
-    return record["payload"]
+    """Legacy server-stored links only. New shares embed the report in the URL hash (#r=)."""
+    raise HTTPException(
+        status_code=410,
+        detail="Server-stored reports are disabled. Re-run analysis to get a stateless share link.",
+    )
 
 @app.post("/ask-clause", response_model=AskClauseResponse)
 async def ask_clause(request: Request, payload: AskClauseRequest):
