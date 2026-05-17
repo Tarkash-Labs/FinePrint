@@ -26,7 +26,7 @@ from prompts import (
     COMPARE_PROMPT,
     get_contract_prompt,
 )
-from utils import extract_json_object, clamp_text, chunk_text
+from utils import extract_json_object, extract_json_any, clamp_text, chunk_text
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,6 @@ def store_report(report: dict) -> str:
         "payload": payload,
     }
     _prune_reports()
-    save_reports_to_disk()
     return report_id
 
 def _prune_reports() -> None:
@@ -327,7 +326,8 @@ async def batch_explain_flags(contract_type: str, red_flags: list[dict]) -> list
                 response_mime_type="application/json"
             )
         )
-        explained_flags = extract_json_object(response_text)
+        parsed = extract_json_any(response_text)
+        explained_flags = parsed if isinstance(parsed, list) else []
         
         explained_map = {f.get("clause_title"): f for f in explained_flags if isinstance(f, dict)}
         for flag in red_flags:
@@ -489,7 +489,6 @@ async def analyze_contract_stream(
 
             # Consolidated Dense Call (TL;DR + Email) runs AFTER all explanations are finalized
             yield sse_event("status", {"stage": "email", "message": f"Drafting TL;DR & Email... ({settings.dense_model})"})
-            await asyncio.sleep(0.5) 
             tldr, email_text, dense_email_ms = await run_consolidated_dense(contract_type, risk_score, verdict, final_flags, company_name or "", user_name or "")
             timing_metrics["dense_email_ms"] = dense_email_ms
 
@@ -510,6 +509,7 @@ async def analyze_contract_stream(
                     "negotiation_email": email_text,
                 },
             })
+            asyncio.create_task(asyncio.to_thread(save_reports_to_disk))
             yield sse_event("share_report", {"report_id": report_id})
 
             yield sse_event("done", {"ok": True, "timing": timing_metrics})
@@ -592,8 +592,16 @@ async def compare_contracts(
     risk_v2, compat_v2, verdict_v2, reason_v2, flags_v2, safe_v2, reqs_v2, _ = res2
 
     prompt = COMPARE_PROMPT.format(
-        v1_flags=json.dumps([f.get("clause_title") for f in flags_v1]),
-        v2_flags=json.dumps([f.get("clause_title") for f in flags_v2])
+        v1_flags=json.dumps([{
+            "title": f["clause_title"],
+            "severity": f["severity"],
+            "issue": f["plain_english_explanation"],
+        } for f in flags_v1], indent=2),
+        v2_flags=json.dumps([{
+            "title": f["clause_title"],
+            "severity": f["severity"],
+            "issue": f["plain_english_explanation"],
+        } for f in flags_v2], indent=2),
     )
     
     response_text = await _call_with_retry(
@@ -608,9 +616,20 @@ async def compare_contracts(
     
     compare_summary = extract_json_object(response_text)
 
-    # Attach the full individual analysis results so the frontend can compute
-    # risk_delta, score_before, score_after, and the severity heatmap
-    # without any extra API calls.
+    def _severity_counts(flags: list[dict]) -> dict:
+        return {
+            "high": sum(1 for f in flags if f.get("severity") == "high"),
+            "medium": sum(1 for f in flags if f.get("severity") == "medium"),
+            "low": sum(1 for f in flags if f.get("severity") == "low"),
+        }
+
+    compare_summary["score_before"] = risk_v1
+    compare_summary["score_after"] = risk_v2
+    compare_summary["risk_delta"] = risk_v2 - risk_v1
+    compare_summary["severity_before"] = _severity_counts(flags_v1)
+    compare_summary["severity_after"] = _severity_counts(flags_v2)
+
+    # Attach the full individual analysis results for detailed UI views.
     result_v1 = {
         "risk_score": risk_v1,
         "compatibility_score": compat_v1,

@@ -30,6 +30,25 @@ def extract_json_object(text: str) -> dict:
             raise
 
 
+def extract_json_any(text: str) -> list | dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        for sc, ec in [("[", "]"), ("{", "}")]:
+            s, e = cleaned.find(sc), cleaned.rfind(ec)
+            if s != -1 and e > s:
+                try:
+                    return json.loads(cleaned[s : e + 1])
+                except json.JSONDecodeError:
+                    continue
+        logger.warning("extract_json_any failed: %s", cleaned[:300])
+        raise
+
+
 def clamp_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
